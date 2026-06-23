@@ -1,0 +1,22 @@
+{
+    "env_name": "bouncing",
+    "model_type": "Pixel",
+    "context_len": 5,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.001,
+    "batch_size": 32,
+    "num_workers": 16,
+    "ae_epochs": 10,
+    "dyn_epochs": 10,
+    "rollout_len": 5,
+    "eval_horizon": 20,
+    "seed": "42",
+    "ae_checkpoint": "",
+    "datagen_name": "bouncing",
+    "resolution": 64,
+    "n_trajectories": 5000,
+    "n_balls_min": 1,
+    "n_balls_max": 5,
+    "speed_min": 3.0,
+    "speed_max": 8.0
+}
