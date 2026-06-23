@@ -14,6 +14,9 @@ MATERIALS = {
 WIDTH, HEIGHT = 64, 64
 GRAVITY = -0.5
 AIR_DRAG_COEFF = 0.02
+# A ball whose post-bounce vertical speed is below this can't escape gravity for a
+# full frame, so we treat it as resting and zero its velocity to avoid sub-pixel jitter.
+REST_VELOCITY = abs(GRAVITY)
 
 
 def _make_ball(width, height, speed_min, speed_max):
@@ -68,7 +71,7 @@ def _resolve_ball_collisions(balls):
             rvx, rvy = a["vx"] - b["vx"], a["vy"] - b["vy"]
             vrel = rvx * nx + rvy * ny
             if vrel <= 0:
-                continue  # already separating
+                continue
 
             e = min(a["mat"]["restitution"], b["mat"]["restitution"])
             imp = -(1 + e) * vrel / (1.0 / a["mass"] + 1.0 / b["mass"])
@@ -78,21 +81,27 @@ def _resolve_ball_collisions(balls):
             b["vy"] -= (imp / b["mass"]) * ny
 
             # Positional correction so the balls don't sink into each other.
-            overlap = (min_dist - dist) / 2.0
-            a["x"] -= overlap * nx
-            a["y"] -= overlap * ny
-            b["x"] += overlap * nx
-            b["y"] += overlap * ny
+            # Split the overlap inversely to mass (matching the impulse above):
+            # the lighter ball gets pushed out more, the heavier one barely moves.
+            overlap = min_dist - dist
+            total_mass = a["mass"] + b["mass"]
+            a_share = overlap * (b["mass"] / total_mass)
+            b_share = overlap * (a["mass"] / total_mass)
+            a["x"] -= a_share * nx
+            a["y"] -= a_share * ny
+            b["x"] += b_share * nx
+            b["y"] += b_share * ny
 
 
 def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_frames=100,
                            width=WIDTH, height=HEIGHT, n_balls_min=1, n_balls_max=5,
-                           speed_min=3.0, speed_max=8.0, progress_cb=None):
+                           speed_min=3.0, speed_max=8.0, n_substeps=4, progress_cb=None):
     """Generate the bouncing-ball dataset. Resolution must be a multiple of 8 to match
     the autoencoder's 3 stride-2 down/up-sampling stages. `progress_cb(done, total)` is
     called periodically (used by the GUI to report progress)."""
     os.makedirs(data_dir, exist_ok=True)
     report_every = max(1, n_trajectories // 100)
+    dt = 1.0 / n_substeps
 
     for i in tqdm(range(n_trajectories), desc="Generating RGB Physics Envs"):
         traj_dir = os.path.join(data_dir, f'traj-{i}')
@@ -113,33 +122,46 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
             positions.append([(b["x"], b["y"]) for b in balls])
             velocities.append([(b["vx"], b["vy"]) for b in balls])
 
-            # Physics update per ball (gravity + quadratic air drag).
-            for b in balls:
-                radius, mass = b["radius"], b["mass"]
-                drag_x = -(AIR_DRAG_COEFF * b["vx"] * abs(b["vx"]) * radius) / mass
-                drag_y = -(AIR_DRAG_COEFF * b["vy"] * abs(b["vy"]) * radius) / mass
+            # Advance the physics in several small substeps per rendered frame.
+            # Smaller per-step displacement keeps fast balls from passing through
+            # each other or the walls before a collision can be detected.
+            for _ in range(n_substeps):
+                # Per-ball integration (gravity + quadratic air drag).
+                for b in balls:
+                    radius, mass = b["radius"], b["mass"]
+                    drag_x = -(AIR_DRAG_COEFF * b["vx"] * abs(b["vx"]) * radius) / mass
+                    drag_y = -(AIR_DRAG_COEFF * b["vy"] * abs(b["vy"]) * radius) / mass
 
-                b["vx"] += drag_x
-                b["vy"] += GRAVITY + drag_y
-                b["x"] += b["vx"]
-                b["y"] += b["vy"]
+                    b["vx"] += drag_x * dt
+                    b["vy"] += (GRAVITY + drag_y) * dt
+                    b["x"] += b["vx"] * dt
+                    b["y"] += b["vy"] * dt
 
-                # Floor collision (uses material restitution + friction).
-                if b["y"] - radius <= 0:
-                    b["y"], b["vy"] = radius, b["vy"] * -b["mat"]["restitution"]
-                    b["vx"] *= b["mat"]["friction"]
-                # Ceiling collision: closes the box so balls never leave the frame.
-                if b["y"] + radius >= height:
-                    b["y"], b["vy"] = height - radius, b["vy"] * -b["mat"]["restitution"]
-                    b["vx"] *= b["mat"]["friction"]
-                # Wall collisions.
-                if b["x"] - radius <= 0:
-                    b["x"], b["vx"] = radius, b["vx"] * -b["mat"]["restitution"]
-                if b["x"] + radius >= width:
-                    b["x"], b["vx"] = width - radius, b["vx"] * -b["mat"]["restitution"]
+                _resolve_ball_collisions(balls)
 
-            # Ball-ball collisions after the per-ball integration step.
-            _resolve_ball_collisions(balls)
+                for b in balls:
+                    radius = b["radius"]
+                    fric = b["mat"]["friction"]
+                    rest = b["mat"]["restitution"]
+                    # Floor collision (uses material restitution + friction).
+                    if b["y"] - radius <= 0:
+                        b["y"], b["vy"] = radius, b["vy"] * -rest
+                        b["vx"] *= fric
+                        # Let the ball settle instead of jittering forever once its
+                        # rebound is too weak to lift it off the floor.
+                        if abs(b["vy"]) < REST_VELOCITY:
+                            b["vy"] = 0.0
+                    # Ceiling collision: closes the box so balls never leave the frame.
+                    if b["y"] + radius >= height:
+                        b["y"], b["vy"] = height - radius, b["vy"] * -rest
+                        b["vx"] *= fric
+                    # Wall collisions (friction damps the tangential, i.e. vertical, speed).
+                    if b["x"] - radius <= 0:
+                        b["x"], b["vx"] = radius, b["vx"] * -rest
+                        b["vy"] *= fric
+                    if b["x"] + radius >= width:
+                        b["x"], b["vx"] = width - radius, b["vx"] * -rest
+                        b["vy"] *= fric
 
         # Shape: (frames, n_balls, 2). n_balls can vary per trajectory.
         np.save(os.path.join(traj_dir, "positions.npy"), np.array(positions))

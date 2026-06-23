@@ -2,14 +2,7 @@ import torch
 import torch.nn as nn
 
 class CNNAutoencoder(nn.Module):
-    """ Part 1: Compresses frames into a SPATIAL latent grid (latent_ch x 8 x 8).
-
-    Unlike a flat-vector bottleneck, keeping the latent spatial preserves the
-    2D layout of the scene. For a moving object this matters: 'where' the ball
-    is stays encoded in the grid position instead of being entangled into a
-    single vector. This is the same design used by SOTA latent models
-    (Stable Diffusion's VAE, VQGAN), which all keep a downsampled spatial grid.
-    """
+    """ Part 1: Compresses frames into a SPATIAL latent grid (latent_ch x 8 x 8)."""
     def __init__(self, latent_ch=32):
         super().__init__()
         # Encoder (64x64 -> 32x32 -> 16x16 -> 8x8), output is a (latent_ch, 8, 8) grid.
