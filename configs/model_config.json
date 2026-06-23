@@ -1,14 +1,16 @@
 {
     "env_name": "bouncing",
-    "model_type": "Latent",
+    "model_type": "Pixel",
     "context_len": 5,
-    "learning_rate": 0.0005,
-    "weight_decay": 0.001,
-    "batch_size": 32,
-    "num_workers": 16,
-    "ae_epochs": 20,
-    "dyn_epochs": 20,
-    "rollout_len": 20,
+    "ae_learning_rate": 0.0005,
+    "dyn_learning_rate": 0.001,
+    "ae_weight_decay": 0.001,
+    "dyn_weight_decay": 0.001,
+    "ae_batch_size": 32,
+    "dyn_batch_size": 128,
+    "ae_epochs": 5,
+    "dyn_epochs": 10,
+    "rollout_len": 10,
     "eval_horizon": 50,
     "seed": "42",
     "ae_checkpoint": "",
@@ -18,5 +20,6 @@
     "n_balls_min": 1,
     "n_balls_max": 3,
     "speed_min": 3.0,
-    "speed_max": 10.0
+    "speed_max": 10.0,
+    "cache_in_vram": false
 }

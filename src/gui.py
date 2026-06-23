@@ -25,88 +25,128 @@ class TrainingGUI(ctk.CTk):
         self.tabview.add("Training")
         self.tabview.add("Data")
 
-        self.settings_frame = ctk.CTkFrame(self.tabview.tab("Training"))
-        self.settings_frame.pack(pady=10, padx=10, fill="x")
+        train_tab = self.tabview.tab("Training")
 
-        # --- ROW 0: Core Architecture ---
-        self.env_label = ctk.CTkLabel(self.settings_frame, text="Environment:", font=self.bold_font)
+        # ===== General =====
+        self.general_frame = ctk.CTkFrame(train_tab)
+        self.general_frame.pack(pady=(10, 5), padx=10, fill="x")
+
+        self.env_label = ctk.CTkLabel(self.general_frame, text="Environment:", font=self.bold_font)
         self.env_label.grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        self.env_menu = ctk.CTkOptionMenu(self.settings_frame, values=self._list_environments(), font=self.huge_font, width=150)
+        self.env_menu = ctk.CTkOptionMenu(self.general_frame, values=self._list_environments(), font=self.huge_font, width=150)
         self.env_menu.grid(row=0, column=1, padx=10, pady=10)
 
-        self.model_label = ctk.CTkLabel(self.settings_frame, text="Architecture:", font=self.bold_font)
+        self.model_label = ctk.CTkLabel(self.general_frame, text="Architecture:", font=self.bold_font)
         self.model_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
-        self.model_menu = ctk.CTkOptionMenu(self.settings_frame, values=["Latent", "Pixel"], font=self.huge_font, command=self._on_model_change)
+        self.model_menu = ctk.CTkOptionMenu(self.general_frame, values=["Latent", "Pixel"], font=self.huge_font, command=self._on_model_change)
         self.model_menu.grid(row=0, column=3, padx=10, pady=10)
 
-        self.ctx_label = ctk.CTkLabel(self.settings_frame, text="Ctx Frames:", font=self.bold_font)
+        self.ctx_label = ctk.CTkLabel(self.general_frame, text="Ctx Frames:", font=self.bold_font)
         self.ctx_label.grid(row=0, column=4, padx=10, pady=10, sticky="e")
-        self.ctx_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
+        self.ctx_entry = ctk.CTkEntry(self.general_frame, width=80, font=self.huge_font)
         self.ctx_entry.grid(row=0, column=5, padx=10, pady=10)
 
-        # --- ROW 1: Optimization Params ---
-        self.lr_label = ctk.CTkLabel(self.settings_frame, text="Learn Rate:", font=self.bold_font)
-        self.lr_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.lr_entry = ctk.CTkEntry(self.settings_frame, width=150, font=self.huge_font)
-        self.lr_entry.grid(row=1, column=1, padx=10, pady=10)
+        self.seed_label = ctk.CTkLabel(self.general_frame, text="Seed:", font=self.bold_font)
+        self.seed_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.seed_entry = ctk.CTkEntry(self.general_frame, width=150, font=self.huge_font, placeholder_text="(blank = random)")
+        self.seed_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
-        self.wd_label = ctk.CTkLabel(self.settings_frame, text="Weight Decay:", font=self.bold_font)
-        self.wd_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
-        self.wd_entry = ctk.CTkEntry(self.settings_frame, width=150, font=self.huge_font)
-        self.wd_entry.grid(row=1, column=3, padx=10, pady=10)
+        # Checked = keep the decoded frame + latent caches resident in GPU VRAM (fastest, no
+        # per-batch host->device copies). Unchecked = cache in system RAM and stream batches to the GPU.
+        self.vram_var = ctk.BooleanVar(value=False)
+        self.vram_check = ctk.CTkCheckBox(self.general_frame, text="Load dataset into VRAM",
+                                          font=self.bold_font, variable=self.vram_var)
+        self.vram_check.grid(row=1, column=2, columnspan=3, padx=10, pady=10, sticky="w")
 
-        self.batch_label = ctk.CTkLabel(self.settings_frame, text="Batch Size:", font=self.bold_font)
-        self.batch_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
-        self.batch_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.batch_entry.grid(row=1, column=5, padx=10, pady=10)
+        # ===== Autoencoder (Phase 1; ignored for the Pixel model) =====
+        self.ae_frame = ctk.CTkFrame(train_tab)
+        self.ae_frame.pack(pady=5, padx=10, fill="x")
 
-        # --- ROW 2: Workers & Epochs ---
-        self.workers_label = ctk.CTkLabel(self.settings_frame, text="Num Workers:", font=self.bold_font)
-        self.workers_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
-        self.workers_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.workers_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+        self.ae_section_label = ctk.CTkLabel(self.ae_frame, text="Autoencoder", font=self.bold_font)
+        self.ae_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
 
-        self.ae_epochs_label = ctk.CTkLabel(self.settings_frame, text="AE Epochs:", font=self.bold_font)
-        self.ae_epochs_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
-        self.ae_epochs_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.ae_epochs_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+        self.ae_lr_label = ctk.CTkLabel(self.ae_frame, text="Learn Rate:", font=self.bold_font)
+        self.ae_lr_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.ae_lr_entry = ctk.CTkEntry(self.ae_frame, width=150, font=self.huge_font)
+        self.ae_lr_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
-        self.dyn_epochs_label = ctk.CTkLabel(self.settings_frame, text="Dyn Epochs:", font=self.bold_font)
-        self.dyn_epochs_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
-        self.dyn_epochs_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.dyn_epochs_entry.grid(row=2, column=5, padx=10, pady=10)
+        self.ae_wd_label = ctk.CTkLabel(self.ae_frame, text="Weight Decay:", font=self.bold_font)
+        self.ae_wd_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
+        self.ae_wd_entry = ctk.CTkEntry(self.ae_frame, width=150, font=self.huge_font)
+        self.ae_wd_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
 
-        # --- ROW 3: Rollout (scheduled sampling horizon) + Seed ---
-        self.rollout_label = ctk.CTkLabel(self.settings_frame, text="Rollout Len:", font=self.bold_font)
-        self.rollout_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.rollout_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.rollout_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
+        self.ae_batch_label = ctk.CTkLabel(self.ae_frame, text="Batch:", font=self.bold_font)
+        self.ae_batch_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
+        self.ae_batch_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.ae_batch_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
 
-        self.seed_label = ctk.CTkLabel(self.settings_frame, text="Seed:", font=self.bold_font)
-        self.seed_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
-        self.seed_entry = ctk.CTkEntry(self.settings_frame, width=150, font=self.huge_font, placeholder_text="(blank = random)")
-        self.seed_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
+        self.ae_epochs_label = ctk.CTkLabel(self.ae_frame, text="Epochs:", font=self.bold_font)
+        self.ae_epochs_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
+        self.ae_epochs_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.ae_epochs_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+
+        self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
+        self.ae_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
+        self.ae_entry.grid(row=2, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
+        self.ae_browse_button.grid(row=2, column=7, padx=10, pady=10)
+
+        # ===== Dynamics Model (Phase 2) =====
+        self.dyn_frame = ctk.CTkFrame(train_tab)
+        self.dyn_frame.pack(pady=5, padx=10, fill="x")
+
+        self.dyn_section_label = ctk.CTkLabel(self.dyn_frame, text="Dynamics Model", font=self.bold_font)
+        self.dyn_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
+
+        self.dyn_lr_label = ctk.CTkLabel(self.dyn_frame, text="Learn Rate:", font=self.bold_font)
+        self.dyn_lr_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.dyn_lr_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
+        self.dyn_lr_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
+
+        self.dyn_wd_label = ctk.CTkLabel(self.dyn_frame, text="Weight Decay:", font=self.bold_font)
+        self.dyn_wd_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
+        self.dyn_wd_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
+        self.dyn_wd_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
+
+        self.dyn_batch_label = ctk.CTkLabel(self.dyn_frame, text="Batch:", font=self.bold_font)
+        self.dyn_batch_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
+        self.dyn_batch_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_batch_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
+
+        self.dyn_epochs_label = ctk.CTkLabel(self.dyn_frame, text="Epochs:", font=self.bold_font)
+        self.dyn_epochs_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
+        self.dyn_epochs_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_epochs_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+
+        self.rollout_label = ctk.CTkLabel(self.dyn_frame, text="Rollout Len:", font=self.bold_font)
+        self.rollout_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.rollout_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.rollout_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
 
         # Max rollout length at eval time; the report tests every horizon from 1 to this.
-        self.eval_horizon_label = ctk.CTkLabel(self.settings_frame, text="Eval Horizon:", font=self.bold_font)
-        self.eval_horizon_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
-        self.eval_horizon_entry = ctk.CTkEntry(self.settings_frame, width=80, font=self.huge_font)
-        self.eval_horizon_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
+        self.eval_horizon_label = ctk.CTkLabel(self.dyn_frame, text="Eval Horizon:", font=self.bold_font)
+        self.eval_horizon_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.eval_horizon_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.eval_horizon_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
 
-        # --- ROW 4: Reuse trained autoencoder (Latent only; blank = train fresh) ---
-        self.ae_label = ctk.CTkLabel(self.settings_frame, text="Reuse AE:", font=self.bold_font)
-        self.ae_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
-        self.ae_entry = ctk.CTkEntry(self.settings_frame, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
-        self.ae_entry.grid(row=4, column=1, columnspan=4, padx=10, pady=10, sticky="ew")
-        self.ae_browse_button = ctk.CTkButton(self.settings_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
-        self.ae_browse_button.grid(row=4, column=5, padx=10, pady=10)
+        # ===== Actions =====
+        self.actions_frame = ctk.CTkFrame(train_tab)
+        self.actions_frame.pack(pady=(5, 10), padx=10, fill="x")
+        # Spacer columns on the outside keep the two buttons grouped together in the centre.
+        self.actions_frame.grid_columnconfigure(0, weight=1)
+        self.actions_frame.grid_columnconfigure(3, weight=1)
 
-        # --- ROW 5: Actions ---
-        self.save_button = ctk.CTkButton(self.settings_frame, text="Save Config", font=self.bold_font, command=self.save_settings)
-        self.save_button.grid(row=5, column=0, columnspan=3, pady=10)
+        self.save_button = ctk.CTkButton(self.actions_frame, text="Save Config", font=self.bold_font, command=self.save_settings)
+        self.save_button.grid(row=0, column=1, padx=20, pady=10)
 
-        self.start_button = ctk.CTkButton(self.settings_frame, text="START TRAINING", font=self.bold_font, fg_color="green", hover_color="darkgreen", command=self.start_training_thread)
-        self.start_button.grid(row=5, column=3, columnspan=3, pady=10)
+        self.start_button = ctk.CTkButton(self.actions_frame, text="START TRAINING", font=self.bold_font, fg_color="green", hover_color="darkgreen", command=self.start_training_thread)
+        self.start_button.grid(row=0, column=2, padx=20, pady=10)
+
+        # AE-section widgets greyed out when the Pixel model (no autoencoder) is selected.
+        self._ae_entries = [self.ae_lr_entry, self.ae_wd_entry, self.ae_batch_entry, self.ae_epochs_entry, self.ae_entry]
+        self._ae_labels = [self.ae_section_label, self.ae_lr_label, self.ae_wd_label,
+                           self.ae_batch_label, self.ae_epochs_label, self.ae_label]
 
         # --- Data tab ---
         self.datagen_frame = ctk.CTkFrame(self.tabview.tab("Data"))
@@ -183,12 +223,16 @@ class TrainingGUI(ctk.CTk):
         self.env_menu.set(env)
 
     def _on_model_change(self, choice):
-        if choice == "Pixel":
-            self.ae_epochs_entry.configure(state="disabled", fg_color="gray20", text_color="gray50")
-            self.ae_epochs_label.configure(text_color="gray50")
-        else:
-            self.ae_epochs_entry.configure(state="normal", fg_color=["#F9F9FA", "#343638"], text_color=["black", "white"])
-            self.ae_epochs_label.configure(text_color=["black", "white"])
+        # The Pixel model has no autoencoder, so grey out the whole AE section.
+        disabled = (choice == "Pixel")
+        for entry in self._ae_entries:
+            if disabled:
+                entry.configure(state="disabled", fg_color="gray20", text_color="gray50")
+            else:
+                entry.configure(state="normal", fg_color=["#F9F9FA", "#343638"], text_color=["black", "white"])
+        self.ae_browse_button.configure(state="disabled" if disabled else "normal")
+        for label in self._ae_labels:
+            label.configure(text_color="gray50" if disabled else ["black", "white"])
 
     def _browse_ae(self):
         path = filedialog.askopenfilename(title="Select autoencoder.pth",
@@ -269,16 +313,19 @@ class TrainingGUI(ctk.CTk):
                 self._set_env(c.get("env_name", "bouncing"))
                 self.model_menu.set(c.get("model_type", "Latent"))
                 self.ctx_entry.delete(0, "end"); self.ctx_entry.insert(0, str(c.get("context_len", 5)))
-                self.lr_entry.delete(0, "end"); self.lr_entry.insert(0, str(c.get("learning_rate", 0.0005)))
-                self.wd_entry.delete(0, "end"); self.wd_entry.insert(0, str(c.get("weight_decay", 0.001)))
-                self.batch_entry.delete(0, "end"); self.batch_entry.insert(0, str(c.get("batch_size", 32)))
-                self.workers_entry.delete(0, "end"); self.workers_entry.insert(0, str(c.get("num_workers", 8)))
+                self.ae_lr_entry.delete(0, "end"); self.ae_lr_entry.insert(0, str(c.get("ae_learning_rate", 0.0005)))
+                self.dyn_lr_entry.delete(0, "end"); self.dyn_lr_entry.insert(0, str(c.get("dyn_learning_rate", 0.0005)))
+                self.ae_wd_entry.delete(0, "end"); self.ae_wd_entry.insert(0, str(c.get("ae_weight_decay", 0.001)))
+                self.dyn_wd_entry.delete(0, "end"); self.dyn_wd_entry.insert(0, str(c.get("dyn_weight_decay", 0.001)))
+                self.ae_batch_entry.delete(0, "end"); self.ae_batch_entry.insert(0, str(c.get("ae_batch_size", 32)))
+                self.dyn_batch_entry.delete(0, "end"); self.dyn_batch_entry.insert(0, str(c.get("dyn_batch_size", 32)))
                 self.ae_epochs_entry.delete(0, "end"); self.ae_epochs_entry.insert(0, str(c.get("ae_epochs", 10)))
                 self.dyn_epochs_entry.delete(0, "end"); self.dyn_epochs_entry.insert(0, str(c.get("dyn_epochs", 15)))
                 self.rollout_entry.delete(0, "end"); self.rollout_entry.insert(0, str(c.get("rollout_len", 5)))
                 self.eval_horizon_entry.delete(0, "end"); self.eval_horizon_entry.insert(0, str(c.get("eval_horizon", 10)))
                 self.seed_entry.delete(0, "end"); self.seed_entry.insert(0, str(c.get("seed", "42")))
                 self._set_entry(self.ae_entry, str(c.get("ae_checkpoint", "")))
+                self.vram_var.set(bool(c.get("cache_in_vram", False)))
                 self.dataname_entry.delete(0, "end"); self.dataname_entry.insert(0, str(c.get("datagen_name", c.get("env_name", "bouncing"))))
                 self.res_entry.delete(0, "end"); self.res_entry.insert(0, str(c.get("resolution", 64)))
                 self.traj_entry.delete(0, "end"); self.traj_entry.insert(0, str(c.get("n_trajectories", 5000)))
@@ -294,10 +341,12 @@ class TrainingGUI(ctk.CTk):
             self._set_env("bouncing")
             self.model_menu.set("Latent")
             self.ctx_entry.insert(0, "5")
-            self.lr_entry.insert(0, "0.0005")
-            self.wd_entry.insert(0, "0.001")
-            self.batch_entry.insert(0, "32")
-            self.workers_entry.insert(0, "8")
+            self.ae_lr_entry.insert(0, "0.0005")
+            self.dyn_lr_entry.insert(0, "0.0005")
+            self.ae_wd_entry.insert(0, "0.001")
+            self.dyn_wd_entry.insert(0, "0.001")
+            self.ae_batch_entry.insert(0, "32")
+            self.dyn_batch_entry.insert(0, "32")
             self.ae_epochs_entry.insert(0, "5")
             self.dyn_epochs_entry.insert(0, "15")
             self.rollout_entry.insert(0, "5")
@@ -316,10 +365,12 @@ class TrainingGUI(ctk.CTk):
                 "env_name": self.env_menu.get(),
                 "model_type": self.model_menu.get(),
                 "context_len": int(self.ctx_entry.get()),
-                "learning_rate": float(self.lr_entry.get()),
-                "weight_decay": float(self.wd_entry.get()),
-                "batch_size": int(self.batch_entry.get()),
-                "num_workers": int(self.workers_entry.get()),
+                "ae_learning_rate": float(self.ae_lr_entry.get()),
+                "dyn_learning_rate": float(self.dyn_lr_entry.get()),
+                "ae_weight_decay": float(self.ae_wd_entry.get()),
+                "dyn_weight_decay": float(self.dyn_wd_entry.get()),
+                "ae_batch_size": int(self.ae_batch_entry.get()),
+                "dyn_batch_size": int(self.dyn_batch_entry.get()),
                 "ae_epochs": int(self.ae_epochs_entry.get()),
                 "dyn_epochs": int(self.dyn_epochs_entry.get()),
                 "rollout_len": int(self.rollout_entry.get()),
@@ -332,7 +383,8 @@ class TrainingGUI(ctk.CTk):
                 "n_balls_min": int(self.balls_min_entry.get()),
                 "n_balls_max": int(self.balls_max_entry.get()),
                 "speed_min": float(self.speed_min_entry.get()),
-                "speed_max": float(self.speed_max_entry.get())
+                "speed_max": float(self.speed_max_entry.get()),
+                "cache_in_vram": bool(self.vram_var.get())
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=4)
@@ -360,11 +412,13 @@ class TrainingGUI(ctk.CTk):
     def _run_training(self, c):
         run_training_pipeline(
             data_dir=f"data/{c['env_name']}", env_name=c['env_name'], model_type=c['model_type'],
-            context_len=c['context_len'], batch_size=c['batch_size'], num_workers=c['num_workers'],
+            context_len=c['context_len'], ae_batch_size=c['ae_batch_size'], dyn_batch_size=c['dyn_batch_size'],
             ae_epochs=c['ae_epochs'], dyn_epochs=c['dyn_epochs'],
-            learning_rate=c['learning_rate'], weight_decay=c['weight_decay'],
+            ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
+            dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
             rollout_len=c.get('rollout_len', 5), eval_horizon=c.get('eval_horizon', 10),
-            seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', "")
+            seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
+            cache_in_vram=c.get('cache_in_vram', False)
         )
         self.is_training = False
         self.after(0, lambda: self.start_button.configure(state="normal", text="START TRAINING"))
