@@ -198,8 +198,11 @@ def _to_rgb(frame, out_wh):
 
 
 def save_rollout_video(predict_fn, traj_dir, device, run_dir, context_len=5, n_steps=40, fps=10, scale=4):
-    """Autoregressive rollout: seed with `context_len` real frames, then feed the
-    model's own predictions back in for `n_steps`.
+    """Side-by-side rollout GIF comparing two prediction regimes:
+      * Free-running: seed with `context_len` real frames, then feed the model's
+        own predictions back in (errors compound over the horizon).
+      * Teacher forcing: every step predicts a single frame from a sliding window
+        of real frames, so each prediction is a clean 1-step-ahead forecast.
     `predict_fn(context)` takes a (1, T, C, H, W) tensor and returns (1, C, H, W).
     """
     to_tensor = transforms.ToTensor()
@@ -212,30 +215,47 @@ def save_rollout_video(predict_fn, traj_dir, device, run_dir, context_len=5, n_s
     frames = torch.stack([to_tensor(Image.open(p).convert("RGB"))
                           for p in frame_paths[:context_len + n_steps]]).to(device)
     _, H, W = frames.shape[1:]
-    context = frames[:context_len].unsqueeze(0)  # (1, T, C, H, W)
 
-    preds = []
+    free_preds = []
+    tf_preds = []
     with torch.no_grad():
+        # Free-running: context absorbs the model's own predictions.
+        context = frames[:context_len].unsqueeze(0)  # (1, T, C, H, W)
         for _ in range(n_steps):
-            pred_frame = predict_fn(context)              # (1, C, H, W)
-            preds.append(pred_frame.squeeze(0))
+            pred_frame = predict_fn(context)          # (1, C, H, W)
+            free_preds.append(pred_frame.squeeze(0))
             context = torch.cat([context[:, 1:], pred_frame.unsqueeze(1)], dim=1)
-    preds = torch.stack(preds)                            # (n_steps, C, H, W)
+
+        # Teacher forcing: each step's context is the real frames preceding the target.
+        for k in range(n_steps):
+            tf_context = frames[k:k + context_len].unsqueeze(0)
+            tf_preds.append(predict_fn(tf_context).squeeze(0))
+
+    free_preds = torch.stack(free_preds)              # (n_steps, C, H, W)
+    tf_preds = torch.stack(tf_preds)
     gt = frames[context_len:context_len + n_steps]
 
     cell = (W * scale, H * scale)
     head_h = 22
-    total_w = 3 * W * scale
+    labels = ["Ground Truth", "Free-run Pred", "Free-run Err", "Teacher-forced Pred", "TF Err"]
+    total_w = len(labels) * W * scale
 
     header = np.full((head_h, total_w, 3), 255, dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    for k, label in enumerate(["Ground Truth", "Prediction", "Abs Error"]):
-        cv2.putText(header, label, (k * W * scale + 8, 15), font, 0.45, (0, 0, 0), 1)
+    for k, label in enumerate(labels):
+        cv2.putText(header, label, (k * W * scale + 8, 15), font, 0.4, (0, 0, 0), 1)
 
     gif_frames = []
     for k in range(n_steps):
-        err = (gt[k] - preds[k]).abs().clamp(0, 1)
-        row = np.concatenate([_to_rgb(gt[k], cell), _to_rgb(preds[k], cell), _to_rgb(err, cell)], axis=1)
+        free_err = (gt[k] - free_preds[k]).abs().clamp(0, 1)
+        tf_err = (gt[k] - tf_preds[k]).abs().clamp(0, 1)
+        row = np.concatenate([
+            _to_rgb(gt[k], cell),
+            _to_rgb(free_preds[k], cell),
+            _to_rgb(free_err, cell),
+            _to_rgb(tf_preds[k], cell),
+            _to_rgb(tf_err, cell),
+        ], axis=1)
         gif_frames.append(Image.fromarray(np.concatenate([header, row], axis=0)))
 
     name = os.path.basename(traj_dir)
