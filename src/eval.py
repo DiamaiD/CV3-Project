@@ -47,7 +47,7 @@ def run_evaluation(test_loader, device, run_dir, model_type, save_images=True, a
 
             # Per-model rollout state.
             if model_type == "Latent":
-                z = ae.encode(ctx_frames.view(-1, C, H, W))
+                z = ae.encode(ctx_frames.view(-1, C, H, W))   # VAE posterior mean (mu)
                 z_seq = z.view(B, T, *z.shape[1:])
                 z_last = z_seq[:, -1].clone()   # encoded last real frame (persistence)
             else:
@@ -189,6 +189,56 @@ def run_evaluation(test_loader, device, run_dir, model_type, save_images=True, a
         cv2.imwrite(save_path, img_padded)
 
         print(f"Saved {model_type} evaluation image grid to: {save_path}")
+
+
+@torch.no_grad()
+def save_vae_reconstructions(ae, loader, device, run_dir, n_samples=8):
+    """Save a [Truth | Reconstruction | Abs. Error] grid for the VAE.
+
+    Encodes real frames to the posterior mean and decodes them -- the exact deterministic
+    path the dynamics model relies on -- so the image is a direct read on how much detail the
+    latent throws away. Written every run (even when the VAE is loaded from a checkpoint) as a
+    fixed reconstruction baseline, and prints mean MSE / PSNR over the batch.
+    """
+    ae.eval()
+    batch = next(iter(loader), None)
+    if batch is None:
+        print("[VAE] No frames available for reconstruction grid; skipping.")
+        return
+    ctx_frames, _ = batch
+    frames = ctx_frames[:, -1].to(device)[:n_samples]      # one real frame per sample
+    recon = ae.decode(ae.encode(frames)).clamp(0, 1)
+
+    mse_val = nn.MSELoss()(recon, frames).item()
+    psnr_val = _psnr(mse_val)
+    print(f"[VAE] Reconstruction over {frames.size(0)} frames -> MSE {mse_val:.6f} | PSNR {psnr_val:.2f} dB")
+
+    grid_imgs = []
+    for j in range(frames.size(0)):
+        truth, rec = frames[j].cpu(), recon[j].cpu()
+        err = torch.clamp(torch.abs(truth - rec) * 2.0, 0, 1)
+        grid_imgs.extend([truth, rec, err])
+
+    img_grid = torchvision.utils.make_grid(grid_imgs, nrow=3, pad_value=0.5)
+    img_np = np.clip(img_grid.permute(1, 2, 0).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    margin = 10
+    header_lines = [
+        (f"VAE reconstruction  |  MSE {mse_val:.6f}  PSNR {psnr_val:.2f} dB", 25, 0.6, 2, (0, 0, 0)),
+        ("Cols: [Truth] | [Reconstruction] | [Abs. Error x2]", 50, 0.5, 1, (0, 0, 0)),
+        ("Abs. Error: Black = Perfect Match | Colors = Detail lost by the latent", 70, 0.45, 1, (0, 0, 200)),
+    ]
+    text_w = max(cv2.getTextSize(t, font, s, th)[0][0] for t, _, s, th, _ in header_lines)
+    right_pad = max(0, (text_w + 2 * margin) - img_bgr.shape[1])
+    img_padded = cv2.copyMakeBorder(img_bgr, 80, 0, 0, right_pad, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    for text, y, scale, thickness, color in header_lines:
+        cv2.putText(img_padded, text, (margin, y), font, scale, color, thickness)
+
+    save_path = os.path.join(run_dir, "vae_reconstructions.png")
+    cv2.imwrite(save_path, img_padded)
+    print(f"Saved VAE reconstruction grid to: {save_path}")
 
 
 def _to_rgb(frame, out_wh):

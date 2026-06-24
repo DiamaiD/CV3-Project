@@ -85,12 +85,17 @@ class TrainingGUI(ctk.CTk):
         self.ae_epochs_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
         self.ae_epochs_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
 
+        self.ae_kl_label = ctk.CTkLabel(self.ae_frame, text="KL Weight (beta):", font=self.bold_font)
+        self.ae_kl_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.ae_kl_entry = ctk.CTkEntry(self.ae_frame, width=150, font=self.huge_font)
+        self.ae_kl_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+
         self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
-        self.ae_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.ae_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
         self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
-        self.ae_entry.grid(row=2, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.ae_entry.grid(row=3, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
         self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
-        self.ae_browse_button.grid(row=2, column=7, padx=10, pady=10)
+        self.ae_browse_button.grid(row=3, column=7, padx=10, pady=10)
 
         # ===== Dynamics Model (Phase 2) =====
         self.dyn_frame = ctk.CTkFrame(train_tab)
@@ -144,9 +149,10 @@ class TrainingGUI(ctk.CTk):
         self.start_button.grid(row=0, column=2, padx=20, pady=10)
 
         # AE-section widgets greyed out when the Pixel model (no autoencoder) is selected.
-        self._ae_entries = [self.ae_lr_entry, self.ae_wd_entry, self.ae_batch_entry, self.ae_epochs_entry, self.ae_entry]
+        self._ae_entries = [self.ae_lr_entry, self.ae_wd_entry, self.ae_batch_entry, self.ae_epochs_entry,
+                            self.ae_kl_entry, self.ae_entry]
         self._ae_labels = [self.ae_section_label, self.ae_lr_label, self.ae_wd_label,
-                           self.ae_batch_label, self.ae_epochs_label, self.ae_label]
+                           self.ae_batch_label, self.ae_epochs_label, self.ae_kl_label, self.ae_label]
 
         # --- Data tab ---
         self.datagen_frame = ctk.CTkFrame(self.tabview.tab("Data"))
@@ -320,6 +326,7 @@ class TrainingGUI(ctk.CTk):
                 self.ae_batch_entry.delete(0, "end"); self.ae_batch_entry.insert(0, str(c.get("ae_batch_size", 32)))
                 self.dyn_batch_entry.delete(0, "end"); self.dyn_batch_entry.insert(0, str(c.get("dyn_batch_size", 32)))
                 self.ae_epochs_entry.delete(0, "end"); self.ae_epochs_entry.insert(0, str(c.get("ae_epochs", 10)))
+                self.ae_kl_entry.delete(0, "end"); self.ae_kl_entry.insert(0, str(c.get("ae_kl_weight", 1.0)))
                 self.dyn_epochs_entry.delete(0, "end"); self.dyn_epochs_entry.insert(0, str(c.get("dyn_epochs", 15)))
                 self.rollout_entry.delete(0, "end"); self.rollout_entry.insert(0, str(c.get("rollout_len", 5)))
                 self.eval_horizon_entry.delete(0, "end"); self.eval_horizon_entry.insert(0, str(c.get("eval_horizon", 10)))
@@ -348,6 +355,7 @@ class TrainingGUI(ctk.CTk):
             self.ae_batch_entry.insert(0, "32")
             self.dyn_batch_entry.insert(0, "32")
             self.ae_epochs_entry.insert(0, "5")
+            self.ae_kl_entry.insert(0, "1.0")
             self.dyn_epochs_entry.insert(0, "15")
             self.rollout_entry.insert(0, "5")
             self.eval_horizon_entry.insert(0, "10")
@@ -372,6 +380,7 @@ class TrainingGUI(ctk.CTk):
                 "ae_batch_size": int(self.ae_batch_entry.get()),
                 "dyn_batch_size": int(self.dyn_batch_entry.get()),
                 "ae_epochs": int(self.ae_epochs_entry.get()),
+                "ae_kl_weight": float(self.ae_kl_entry.get()),
                 "dyn_epochs": int(self.dyn_epochs_entry.get()),
                 "rollout_len": int(self.rollout_entry.get()),
                 "eval_horizon": int(self.eval_horizon_entry.get()),
@@ -415,6 +424,7 @@ class TrainingGUI(ctk.CTk):
             context_len=c['context_len'], ae_batch_size=c['ae_batch_size'], dyn_batch_size=c['dyn_batch_size'],
             ae_epochs=c['ae_epochs'], dyn_epochs=c['dyn_epochs'],
             ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
+            ae_kl_weight=c.get('ae_kl_weight', 1.0),
             dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
             rollout_len=c.get('rollout_len', 5), eval_horizon=c.get('eval_horizon', 10),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),

@@ -2,6 +2,7 @@ import time
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05):
@@ -19,12 +20,14 @@ def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05):
 
 @torch.no_grad()
 def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
-    """Encode every cached frame through the frozen AE once into a float16 latent cache.
+    """Encode every cached frame through the frozen VAE once into a float16 latent cache.
 
-    frames: (M, C, H, W) uint8 on `cache_device`. Returns (M, Cl, h, w) float16 on `cache_device`.
-    The dynamics phase then trains directly on these latents, so the AE never runs inside the
-    per-epoch training loop. float16 storage roughly halves the memory vs float32 (~2 GB vs ~4 GB
-    for 500k 32x8x8 latents) at negligible accuracy cost for an MSE objective.
+    frames: (M, C, H, W) uint8 on `cache_device`. Returns (M, Cl, h, w) float16 on
+    `cache_device`. Uses the deterministic posterior mean (ae.encode -> mu) as 'the latent',
+    so the dynamics phase trains directly on these and the VAE never runs inside the per-epoch
+    loop. The VAE's KL term already keeps mu ~unit-Gaussian per channel, so no separate
+    normalization is applied here. float16 storage roughly halves memory vs float32 (~2 GB vs
+    ~4 GB for 500k 32x8x8 latents) at negligible accuracy cost for an MSE objective.
     """
     ae.eval()
     M = frames.shape[0]
@@ -43,43 +46,74 @@ def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
     return z_all
 
 
-def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3, weight_decay=1e-4, device="cuda"):
-    print("--- Phase 1: Training Autoencoder ---")
+def _vae_kl(mu, logvar):
+    """KL(N(mu, sigma^2) || N(0, 1)) summed over latent dims, averaged over the batch."""
+    return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
+
+
+def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
+                      weight_decay=1e-4, kl_weight=1.0, kl_anneal_frac=0.3, device="cuda"):
+    """Train the convolutional VAE: reconstruction + beta * KL(N(mu,sigma^2) || N(0,1)).
+
+    Reconstruction is summed over pixels (per image) so it sits on the same scale as the
+    summed-over-dims KL, which makes `kl_weight` (beta) an O(1) knob. beta is linearly warmed
+    up from 0 over the first `kl_anneal_frac` of training so the decoder can establish sharp
+    reconstructions before the KL pressure kicks in -- the main guard against posterior
+    collapse. Tuning by the logged numbers: if Val PSNR drops much and KL collapses toward 0,
+    lower kl_weight; if KL stays very large (latent barely regularized), raise it.
+    """
+    print("--- Phase 1: Training Autoencoder (VAE) ---")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     total_steps = epochs * len(train_loader)
     scheduler = build_warmup_cosine(optimizer, total_steps)
-    criterion = nn.MSELoss()
     ae.to(device)
+
+    warmup_epochs = max(1, int(epochs * kl_anneal_frac))
 
     for epoch in range(epochs):
         start_time = time.time()
+        beta = kl_weight * min(1.0, epoch / warmup_epochs)
 
         ae.train()
-        train_loss = torch.zeros((), device=device)
+        tr_recon = torch.zeros((), device=device)
+        tr_kl = torch.zeros((), device=device)
         for ctx_frames, target_frame in train_loader:
             B, T, C, H, W = ctx_frames.shape
             x = ctx_frames.view(-1, C, H, W).to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            loss = criterion(ae(x), x)
+            recon, mu, logvar = ae(x)
+            recon_loss = F.mse_loss(recon, x, reduction="sum") / x.shape[0]
+            kl = _vae_kl(mu, logvar)
+            loss = recon_loss + beta * kl
             loss.backward()
             optimizer.step()
             scheduler.step()
-            train_loss += loss.detach()
+            tr_recon += recon_loss.detach()
+            tr_kl += kl.detach()
 
         ae.eval()
-        val_loss = torch.zeros((), device=device)
+        val_mse = torch.zeros((), device=device)   # mean MSE -> comparable PSNR
+        val_kl = torch.zeros((), device=device)
         with torch.no_grad():
             for ctx_frames, target_frame in val_loader:
                 B, T, C, H, W = ctx_frames.shape
                 x = ctx_frames.view(-1, C, H, W).to(device)
-                val_loss += criterion(ae(x), x)
+                recon, mu, logvar = ae(x)
+                val_mse += F.mse_loss(recon, x)   # mean over all elements
+                val_kl += _vae_kl(mu, logvar)
 
+        nb_tr, nb_val = len(train_loader), len(val_loader)
+        val_mse_mean = val_mse.item() / nb_val
+        val_psnr = 10.0 * math.log10(1.0 / val_mse_mean) if val_mse_mean > 0 else float("inf")
         epoch_time = time.time() - start_time
         current_lr = scheduler.get_last_lr()[0]
 
-        print(f"AE Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e} | Train Loss: {train_loss.item()/len(train_loader):.8f} | Val Loss: {val_loss.item()/len(val_loader):.8f}")
+        print(f"AE Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e} | "
+              f"Beta: {beta:.5f} | Train Recon(sum): {tr_recon.item()/nb_tr:.4f} | "
+              f"Train KL: {tr_kl.item()/nb_tr:.2f} | Val MSE: {val_mse_mean:.8f} | "
+              f"Val PSNR: {val_psnr:.2f} dB | Val KL: {val_kl.item()/nb_val:.2f}")
     return ae
 
 

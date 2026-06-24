@@ -6,14 +6,14 @@ import glob
 import os
 
 from src.dataset import FrameCache, CachedLoader
-from src.models import CNNAutoencoder, LatentDynamicsConvGRU, PixelDynamicsCNN
+from src.models import CNNVAE, LatentResidualCNN, PixelDynamicsCNN
 from src.train import train_autoencoder, train_dynamics, train_pixel_model, build_latent_cache
-from src.eval import run_evaluation, save_rollout_video
+from src.eval import run_evaluation, save_rollout_video, save_vae_reconstructions
 from src.utils import setup_run_folder
 
 def run_training_pipeline(data_dir, env_name, model_type="Latent", context_len=5,
                           ae_batch_size=32, dyn_batch_size=32, ae_epochs=5, dyn_epochs=15,
-                          ae_learning_rate=1e-3, ae_weight_decay=1e-4,
+                          ae_learning_rate=1e-3, ae_weight_decay=1e-4, ae_kl_weight=1.0,
                           dyn_learning_rate=1e-3, dyn_weight_decay=1e-4, rollout_len=5,
                           eval_horizon=10, seed=None, ae_checkpoint="", cache_in_vram=False):
 
@@ -66,8 +66,8 @@ def run_training_pipeline(data_dir, env_name, model_type="Latent", context_len=5
                             shuffle=shuffle, horizon=horizon)
 
     if model_type == "Latent":
-        ae = CNNAutoencoder(latent_ch=32).to(device)
-        dynamics = LatentDynamicsConvGRU(latent_ch=32, hidden_ch=64).to(device)
+        ae = CNNVAE(latent_ch=32).to(device)
+        dynamics = LatentResidualCNN(latent_ch=32, context_len=context_len).to(device)
 
         if ae_checkpoint and os.path.exists(ae_checkpoint):
             ae.load_state_dict(torch.load(ae_checkpoint, map_location=device))
@@ -76,9 +76,16 @@ def run_training_pipeline(data_dir, env_name, model_type="Latent", context_len=5
             if ae_checkpoint:
                 print(f"[Warn] AE checkpoint not found: {ae_checkpoint}. Training a new autoencoder.")
             ae = train_autoencoder(ae, pixel_loader(train_trajs, 1, True, ae_batch_size), pixel_loader(val_trajs, 1, False, ae_batch_size),
-                                   epochs=ae_epochs, learning_rate=ae_learning_rate, weight_decay=ae_weight_decay, device=device)
+                                   epochs=ae_epochs, learning_rate=ae_learning_rate, weight_decay=ae_weight_decay,
+                                   kl_weight=ae_kl_weight, device=device)
 
-        # Precompute the frozen-AE latents once so the dynamics phase never re-runs the AE.
+        # Reconstruction baseline grid (truth | recon | abs error). Always written -- even
+        # when the VAE is loaded from a checkpoint -- as a cheap fixed read on latent quality.
+        save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
+
+        # Precompute the frozen-VAE latents (posterior means) once so the dynamics phase
+        # never re-runs the VAE. The KL already keeps them ~unit-Gaussian, so no extra
+        # normalization is needed.
         z_all = build_latent_cache(ae, frame_cache.frames, device, cache_device)
 
         def latent_loader(trajs, horizon, shuffle, bs):
@@ -132,6 +139,7 @@ if __name__ == "__main__":
     parser.add_argument("--dyn_epochs", type=int, default=15)
     parser.add_argument("--ae_learning_rate", type=float, default=5e-4)
     parser.add_argument("--ae_weight_decay", type=float, default=1e-3)
+    parser.add_argument("--ae_kl_weight", type=float, default=1.0, help="VAE KL weight (beta). Lower if reconstructions blur / KL collapses; raise if the latent is barely regularized.")
     parser.add_argument("--dyn_learning_rate", type=float, default=5e-4)
     parser.add_argument("--dyn_weight_decay", type=float, default=1e-3)
     parser.add_argument("--rollout_len", type=int, default=5, help="Multi-step rollout horizon for dynamics scheduled sampling")
@@ -145,7 +153,7 @@ if __name__ == "__main__":
         args.data_dir, args.env_name, args.model_type,
         context_len=args.context_len, ae_batch_size=args.ae_batch_size, dyn_batch_size=args.dyn_batch_size,
         ae_epochs=args.ae_epochs, dyn_epochs=args.dyn_epochs,
-        ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay,
+        ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
         dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay, rollout_len=args.rollout_len,
         eval_horizon=args.eval_horizon, seed=args.seed, ae_checkpoint=args.ae_checkpoint,
         cache_in_vram=args.cache_in_vram
