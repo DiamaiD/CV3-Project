@@ -36,15 +36,10 @@ class TrainingGUI(ctk.CTk):
         self.env_menu = ctk.CTkOptionMenu(self.general_frame, values=self._list_environments(), font=self.huge_font, width=150)
         self.env_menu.grid(row=0, column=1, padx=10, pady=10)
 
-        self.model_label = ctk.CTkLabel(self.general_frame, text="Architecture:", font=self.bold_font)
-        self.model_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
-        self.model_menu = ctk.CTkOptionMenu(self.general_frame, values=["Latent", "Pixel"], font=self.huge_font, command=self._on_model_change)
-        self.model_menu.grid(row=0, column=3, padx=10, pady=10)
-
         self.ctx_label = ctk.CTkLabel(self.general_frame, text="Ctx Frames:", font=self.bold_font)
-        self.ctx_label.grid(row=0, column=4, padx=10, pady=10, sticky="e")
+        self.ctx_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
         self.ctx_entry = ctk.CTkEntry(self.general_frame, width=80, font=self.huge_font)
-        self.ctx_entry.grid(row=0, column=5, padx=10, pady=10)
+        self.ctx_entry.grid(row=0, column=3, padx=10, pady=10)
 
         self.seed_label = ctk.CTkLabel(self.general_frame, text="Seed:", font=self.bold_font)
         self.seed_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
@@ -58,11 +53,11 @@ class TrainingGUI(ctk.CTk):
                                           font=self.bold_font, variable=self.vram_var)
         self.vram_check.grid(row=1, column=2, columnspan=3, padx=10, pady=10, sticky="w")
 
-        # ===== Autoencoder (Phase 1; ignored for the Pixel model) =====
+        # ===== Autoencoder (Phase 1: continuous VAE) =====
         self.ae_frame = ctk.CTkFrame(train_tab)
         self.ae_frame.pack(pady=5, padx=10, fill="x")
 
-        self.ae_section_label = ctk.CTkLabel(self.ae_frame, text="Autoencoder", font=self.bold_font)
+        self.ae_section_label = ctk.CTkLabel(self.ae_frame, text="Autoencoder (VAE)", font=self.bold_font)
         self.ae_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
 
         self.ae_lr_label = ctk.CTkLabel(self.ae_frame, text="Learn Rate:", font=self.bold_font)
@@ -90,6 +85,20 @@ class TrainingGUI(ctk.CTk):
         self.ae_kl_entry = ctk.CTkEntry(self.ae_frame, width=150, font=self.huge_font)
         self.ae_kl_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
 
+        # VAE latent spatial size: 8 -> 8x8, 16 -> 16x16 (motion more spatially local for the DiT,
+        # at 4x token / latent-cache cost). Changing this requires retraining the VAE.
+        self.latent_grid_label = ctk.CTkLabel(self.ae_frame, text="Latent Grid:", font=self.bold_font)
+        self.latent_grid_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.latent_grid_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.latent_grid_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+
+        # Perceptual (LPIPS-VGG) loss weight. >0 makes latent L2 track perceptual quality (needs
+        # `pip install lpips`); 0 = pixel + KL only. Key fix for the prediction-blur ceiling.
+        self.lpips_label = ctk.CTkLabel(self.ae_frame, text="LPIPS Weight:", font=self.bold_font)
+        self.lpips_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
+        self.lpips_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.lpips_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
+
         self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
         self.ae_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
         self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
@@ -97,11 +106,11 @@ class TrainingGUI(ctk.CTk):
         self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
         self.ae_browse_button.grid(row=3, column=7, padx=10, pady=10)
 
-        # ===== Dynamics Model (Phase 2) =====
+        # ===== Flow Matching (DiT) (Phase 2) =====
         self.dyn_frame = ctk.CTkFrame(train_tab)
         self.dyn_frame.pack(pady=5, padx=10, fill="x")
 
-        self.dyn_section_label = ctk.CTkLabel(self.dyn_frame, text="Dynamics Model", font=self.bold_font)
+        self.dyn_section_label = ctk.CTkLabel(self.dyn_frame, text="Flow Matching (DiT)", font=self.bold_font)
         self.dyn_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
 
         self.dyn_lr_label = ctk.CTkLabel(self.dyn_frame, text="Learn Rate:", font=self.bold_font)
@@ -124,16 +133,50 @@ class TrainingGUI(ctk.CTk):
         self.dyn_epochs_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dyn_epochs_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
 
-        self.rollout_label = ctk.CTkLabel(self.dyn_frame, text="Rollout Len:", font=self.bold_font)
-        self.rollout_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
-        self.rollout_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.rollout_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+        self.dit_dmodel_label = ctk.CTkLabel(self.dyn_frame, text="DiT Width:", font=self.bold_font)
+        self.dit_dmodel_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.dit_dmodel_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_dmodel_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+
+        self.dit_layers_label = ctk.CTkLabel(self.dyn_frame, text="DiT Layers:", font=self.bold_font)
+        self.dit_layers_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.dit_layers_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_layers_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+
+        self.dit_heads_label = ctk.CTkLabel(self.dyn_frame, text="DiT Heads:", font=self.bold_font)
+        self.dit_heads_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
+        self.dit_heads_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_heads_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
+
+        # Euler ODE steps used to sample one frame from the flow.
+        self.infsteps_label = ctk.CTkLabel(self.dyn_frame, text="Infer Steps:", font=self.bold_font)
+        self.infsteps_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
+        self.infsteps_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.infsteps_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
 
         # Max rollout length at eval time; the report tests every horizon from 1 to this.
         self.eval_horizon_label = ctk.CTkLabel(self.dyn_frame, text="Eval Horizon:", font=self.bold_font)
-        self.eval_horizon_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.eval_horizon_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
         self.eval_horizon_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.eval_horizon_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+        self.eval_horizon_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
+
+        # Cap on test batches rolled out at eval (each window = horizon x infer-steps DiT forwards).
+        self.eval_batches_label = ctk.CTkLabel(self.dyn_frame, text="Eval Batches:", font=self.bold_font)
+        self.eval_batches_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
+        self.eval_batches_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.eval_batches_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
+
+        # Chunk prediction: number of future frames (K) the DiT denoises jointly per call.
+        self.chunk_len_label = ctk.CTkLabel(self.dyn_frame, text="Chunk Len:", font=self.bold_font)
+        self.chunk_len_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
+        self.chunk_len_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.chunk_len_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
+
+        # Best-of-N eval: sample N rollouts per window, also report the best (multiplies eval cost).
+        self.best_of_n_label = ctk.CTkLabel(self.dyn_frame, text="Best-of-N:", font=self.bold_font)
+        self.best_of_n_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
+        self.best_of_n_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.best_of_n_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
 
         # ===== Actions =====
         self.actions_frame = ctk.CTkFrame(train_tab)
@@ -147,12 +190,6 @@ class TrainingGUI(ctk.CTk):
 
         self.start_button = ctk.CTkButton(self.actions_frame, text="START TRAINING", font=self.bold_font, fg_color="green", hover_color="darkgreen", command=self.start_training_thread)
         self.start_button.grid(row=0, column=2, padx=20, pady=10)
-
-        # AE-section widgets greyed out when the Pixel model (no autoencoder) is selected.
-        self._ae_entries = [self.ae_lr_entry, self.ae_wd_entry, self.ae_batch_entry, self.ae_epochs_entry,
-                            self.ae_kl_entry, self.ae_entry]
-        self._ae_labels = [self.ae_section_label, self.ae_lr_label, self.ae_wd_label,
-                           self.ae_batch_label, self.ae_epochs_label, self.ae_kl_label, self.ae_label]
 
         # --- Data tab ---
         self.datagen_frame = ctk.CTkFrame(self.tabview.tab("Data"))
@@ -227,18 +264,6 @@ class TrainingGUI(ctk.CTk):
             vals = vals + [env]
         self.env_menu.configure(values=vals)
         self.env_menu.set(env)
-
-    def _on_model_change(self, choice):
-        # The Pixel model has no autoencoder, so grey out the whole AE section.
-        disabled = (choice == "Pixel")
-        for entry in self._ae_entries:
-            if disabled:
-                entry.configure(state="disabled", fg_color="gray20", text_color="gray50")
-            else:
-                entry.configure(state="normal", fg_color=["#F9F9FA", "#343638"], text_color=["black", "white"])
-        self.ae_browse_button.configure(state="disabled" if disabled else "normal")
-        for label in self._ae_labels:
-            label.configure(text_color="gray50" if disabled else ["black", "white"])
 
     def _browse_ae(self):
         path = filedialog.askopenfilename(title="Select autoencoder.pth",
@@ -317,7 +342,6 @@ class TrainingGUI(ctk.CTk):
                 with open(CONFIG_FILE, "r") as f:
                     c = json.load(f)
                 self._set_env(c.get("env_name", "bouncing"))
-                self.model_menu.set(c.get("model_type", "Latent"))
                 self.ctx_entry.delete(0, "end"); self.ctx_entry.insert(0, str(c.get("context_len", 5)))
                 self.ae_lr_entry.delete(0, "end"); self.ae_lr_entry.insert(0, str(c.get("ae_learning_rate", 0.0005)))
                 self.dyn_lr_entry.delete(0, "end"); self.dyn_lr_entry.insert(0, str(c.get("dyn_learning_rate", 0.0005)))
@@ -326,10 +350,18 @@ class TrainingGUI(ctk.CTk):
                 self.ae_batch_entry.delete(0, "end"); self.ae_batch_entry.insert(0, str(c.get("ae_batch_size", 32)))
                 self.dyn_batch_entry.delete(0, "end"); self.dyn_batch_entry.insert(0, str(c.get("dyn_batch_size", 32)))
                 self.ae_epochs_entry.delete(0, "end"); self.ae_epochs_entry.insert(0, str(c.get("ae_epochs", 10)))
-                self.ae_kl_entry.delete(0, "end"); self.ae_kl_entry.insert(0, str(c.get("ae_kl_weight", 1.0)))
-                self.dyn_epochs_entry.delete(0, "end"); self.dyn_epochs_entry.insert(0, str(c.get("dyn_epochs", 15)))
-                self.rollout_entry.delete(0, "end"); self.rollout_entry.insert(0, str(c.get("rollout_len", 5)))
-                self.eval_horizon_entry.delete(0, "end"); self.eval_horizon_entry.insert(0, str(c.get("eval_horizon", 10)))
+                self.ae_kl_entry.delete(0, "end"); self.ae_kl_entry.insert(0, str(c.get("ae_kl_weight", 0.005)))
+                self.lpips_entry.delete(0, "end"); self.lpips_entry.insert(0, str(c.get("ae_lpips_weight", 0.0)))
+                self.latent_grid_entry.delete(0, "end"); self.latent_grid_entry.insert(0, str(c.get("latent_grid", 8)))
+                self.dit_dmodel_entry.delete(0, "end"); self.dit_dmodel_entry.insert(0, str(c.get("dit_d_model", 256)))
+                self.dit_layers_entry.delete(0, "end"); self.dit_layers_entry.insert(0, str(c.get("dit_n_layers", 6)))
+                self.dit_heads_entry.delete(0, "end"); self.dit_heads_entry.insert(0, str(c.get("dit_n_heads", 8)))
+                self.infsteps_entry.delete(0, "end"); self.infsteps_entry.insert(0, str(c.get("inference_steps", 10)))
+                self.dyn_epochs_entry.delete(0, "end"); self.dyn_epochs_entry.insert(0, str(c.get("dyn_epochs", 30)))
+                self.eval_horizon_entry.delete(0, "end"); self.eval_horizon_entry.insert(0, str(c.get("eval_horizon", 50)))
+                self.eval_batches_entry.delete(0, "end"); self.eval_batches_entry.insert(0, str(c.get("eval_max_batches", 24)))
+                self.chunk_len_entry.delete(0, "end"); self.chunk_len_entry.insert(0, str(c.get("chunk_len", 5)))
+                self.best_of_n_entry.delete(0, "end"); self.best_of_n_entry.insert(0, str(c.get("eval_best_of_n", 1)))
                 self.seed_entry.delete(0, "end"); self.seed_entry.insert(0, str(c.get("seed", "42")))
                 self._set_entry(self.ae_entry, str(c.get("ae_checkpoint", "")))
                 self.vram_var.set(bool(c.get("cache_in_vram", False)))
@@ -340,25 +372,31 @@ class TrainingGUI(ctk.CTk):
                 self.balls_max_entry.delete(0, "end"); self.balls_max_entry.insert(0, str(c.get("n_balls_max", 5)))
                 self.speed_min_entry.delete(0, "end"); self.speed_min_entry.insert(0, str(c.get("speed_min", 3.0)))
                 self.speed_max_entry.delete(0, "end"); self.speed_max_entry.insert(0, str(c.get("speed_max", 8.0)))
-                self._on_model_change(self.model_menu.get())
                 self.log_textbox.insert("end", f"[System] Settings loaded from {CONFIG_FILE}\n")
             except Exception as e:
                 self.log_textbox.insert("end", f"[Error] Load config failed: {e}\n")
         else:
             self._set_env("bouncing")
-            self.model_menu.set("Latent")
             self.ctx_entry.insert(0, "5")
             self.ae_lr_entry.insert(0, "0.0005")
-            self.dyn_lr_entry.insert(0, "0.0005")
-            self.ae_wd_entry.insert(0, "0.001")
-            self.dyn_wd_entry.insert(0, "0.001")
+            self.dyn_lr_entry.insert(0, "0.0003")
+            self.ae_wd_entry.insert(0, "0.01")
+            self.dyn_wd_entry.insert(0, "0.0001")
             self.ae_batch_entry.insert(0, "32")
-            self.dyn_batch_entry.insert(0, "32")
-            self.ae_epochs_entry.insert(0, "5")
-            self.ae_kl_entry.insert(0, "1.0")
-            self.dyn_epochs_entry.insert(0, "15")
-            self.rollout_entry.insert(0, "5")
-            self.eval_horizon_entry.insert(0, "10")
+            self.dyn_batch_entry.insert(0, "64")
+            self.ae_epochs_entry.insert(0, "20")
+            self.ae_kl_entry.insert(0, "0.005")
+            self.lpips_entry.insert(0, "1.0")
+            self.latent_grid_entry.insert(0, "8")
+            self.dit_dmodel_entry.insert(0, "256")
+            self.dit_layers_entry.insert(0, "6")
+            self.dit_heads_entry.insert(0, "8")
+            self.infsteps_entry.insert(0, "10")
+            self.dyn_epochs_entry.insert(0, "30")
+            self.eval_horizon_entry.insert(0, "50")
+            self.eval_batches_entry.insert(0, "24")
+            self.chunk_len_entry.insert(0, "5")
+            self.best_of_n_entry.insert(0, "1")
             self.dataname_entry.insert(0, "bouncing")
             self.res_entry.insert(0, "64")
             self.traj_entry.insert(0, "5000")
@@ -371,7 +409,6 @@ class TrainingGUI(ctk.CTk):
         try:
             config = {
                 "env_name": self.env_menu.get(),
-                "model_type": self.model_menu.get(),
                 "context_len": int(self.ctx_entry.get()),
                 "ae_learning_rate": float(self.ae_lr_entry.get()),
                 "dyn_learning_rate": float(self.dyn_lr_entry.get()),
@@ -381,9 +418,17 @@ class TrainingGUI(ctk.CTk):
                 "dyn_batch_size": int(self.dyn_batch_entry.get()),
                 "ae_epochs": int(self.ae_epochs_entry.get()),
                 "ae_kl_weight": float(self.ae_kl_entry.get()),
+                "ae_lpips_weight": float(self.lpips_entry.get()),
+                "latent_grid": int(self.latent_grid_entry.get()),
+                "dit_d_model": int(self.dit_dmodel_entry.get()),
+                "dit_n_layers": int(self.dit_layers_entry.get()),
+                "dit_n_heads": int(self.dit_heads_entry.get()),
+                "inference_steps": int(self.infsteps_entry.get()),
                 "dyn_epochs": int(self.dyn_epochs_entry.get()),
-                "rollout_len": int(self.rollout_entry.get()),
                 "eval_horizon": int(self.eval_horizon_entry.get()),
+                "eval_max_batches": int(self.eval_batches_entry.get()),
+                "chunk_len": int(self.chunk_len_entry.get()),
+                "eval_best_of_n": int(self.best_of_n_entry.get()),
                 "seed": self.seed_entry.get().strip(),
                 "ae_checkpoint": self.ae_entry.get().strip(),
                 "datagen_name": self.dataname_entry.get().strip(),
@@ -410,7 +455,7 @@ class TrainingGUI(ctk.CTk):
         if not config: return
             
         self.log_textbox.delete("1.0", "end")
-        self.log_textbox.insert("end", f"[System] Starting {config['model_type']} run...\n")
+        self.log_textbox.insert("end", "[System] Starting Latent Flow Matching run...\n")
         self.is_training = True
         self.start_button.configure(state="disabled", text="Training...")
 
@@ -420,15 +465,18 @@ class TrainingGUI(ctk.CTk):
 
     def _run_training(self, c):
         run_training_pipeline(
-            data_dir=f"data/{c['env_name']}", env_name=c['env_name'], model_type=c['model_type'],
+            data_dir=f"data/{c['env_name']}", env_name=c['env_name'],
             context_len=c['context_len'], ae_batch_size=c['ae_batch_size'], dyn_batch_size=c['dyn_batch_size'],
             ae_epochs=c['ae_epochs'], dyn_epochs=c['dyn_epochs'],
             ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
-            ae_kl_weight=c.get('ae_kl_weight', 1.0),
+            ae_kl_weight=c.get('ae_kl_weight', 0.005), ae_lpips_weight=c.get('ae_lpips_weight', 0.0),
             dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
-            rollout_len=c.get('rollout_len', 5), eval_horizon=c.get('eval_horizon', 10),
+            eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
-            cache_in_vram=c.get('cache_in_vram', False)
+            cache_in_vram=c.get('cache_in_vram', False), latent_grid=c.get('latent_grid', 8),
+            chunk_len=c.get('chunk_len', 5), eval_best_of_n=c.get('eval_best_of_n', 1),
+            dit_d_model=c.get('dit_d_model', 256), dit_n_layers=c.get('dit_n_layers', 6),
+            dit_n_heads=c.get('dit_n_heads', 8), inference_steps=c.get('inference_steps', 10)
         )
         self.is_training = False
         self.after(0, lambda: self.start_button.configure(state="normal", text="START TRAINING"))

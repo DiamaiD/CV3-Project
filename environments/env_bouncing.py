@@ -14,6 +14,13 @@ MATERIALS = {
 WIDTH, HEIGHT = 64, 64
 GRAVITY = -0.5
 AIR_DRAG_COEFF = 0.02
+# Sub-pixel rendering precision: cv2.circle interprets the center/radius as fixed-point numbers
+# with this many fractional bits, so the ball's CONTINUOUS position is preserved instead of being
+# truncated to a whole pixel. Combined with LINE_AA this is what keeps frame-to-frame motion smooth
+# and predictable -- integer rendering turns a ball drifting 1.4 px/frame into a 1,1,2,1,2 staircase
+# and injects unrecoverable quantization noise into the dynamics. 4 bits = 1/16 px.
+SUBPIX_BITS = 4
+_SUBPIX = 1 << SUBPIX_BITS
 # A ball whose post-bounce vertical speed is below this can't escape gravity for a
 # full frame, so we treat it as resting and zero its velocity to avoid sub-pixel jitter.
 REST_VELOCITY = abs(GRAVITY)
@@ -113,10 +120,13 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
         positions, velocities = [], []
 
         for frame in range(max_frames):
-            # Render RGB Image (balls drawn over a white background).
+            # Render RGB Image (balls drawn over a white background). Fixed-point sub-pixel center +
+            # anti-aliasing so the continuous physics position survives into the pixels (see SUBPIX_BITS).
             img = np.ones((height, width, 3), dtype=np.uint8) * 255
             for b in balls:
-                cv2.circle(img, (int(b["x"]), height - int(b["y"])), b["radius"], b["mat"]["color"], -1)
+                center = (round(b["x"] * _SUBPIX), round((height - b["y"]) * _SUBPIX))
+                cv2.circle(img, center, round(b["radius"] * _SUBPIX), b["mat"]["color"], -1,
+                           lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
             cv2.imwrite(os.path.join(traj_dir, f'frame_{frame:03d}.png'), img)
 
             positions.append([(b["x"], b["y"]) for b in balls])

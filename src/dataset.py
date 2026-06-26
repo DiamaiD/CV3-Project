@@ -54,9 +54,13 @@ class FrameCache:
 
     def __init__(self, traj_dirs, cache_device="cpu", disk_cache_path=None):
         traj_dirs = sorted(traj_dirs)
-        # name -> sorted list of frame paths; signature is name -> frame count.
+        # name -> sorted list of frame paths. Signature is name -> (frame count, first-frame mtime).
+        # The mtime catches an in-place REGENERATION (same names + counts but new pixels, e.g.
+        # toggling anti-aliasing / sub-pixel rendering): without it a content change would silently
+        # reuse the stale cache and quietly invalidate the whole run.
         listing = {os.path.basename(t): sorted(glob.glob(os.path.join(t, "*.png"))) for t in traj_dirs}
-        sig = {name: len(paths) for name, paths in listing.items()}
+        sig = {name: [len(paths), os.path.getmtime(paths[0]) if paths else 0.0]
+               for name, paths in listing.items()}
 
         frames = None
         ranges = None

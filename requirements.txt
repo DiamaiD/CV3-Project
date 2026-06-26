@@ -5,3 +5,4 @@ opencv-python
 tqdm
 Pillow
 customtkinter
+lpips

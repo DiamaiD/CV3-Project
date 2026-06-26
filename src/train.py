@@ -1,7 +1,6 @@
 import time
 import math
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
@@ -43,7 +42,23 @@ def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
             z_all = torch.empty((M, *z.shape[1:]), dtype=torch.float16, device=cache_device)
         z_all[i : i + batch_size] = z.to(cache_device)
     print(f"[Cache] Latent cache ready: {tuple(z_all.shape)} float16 (~{z_all.numel() * 2 / 1e9:.2f} GB).")
-    return z_all
+
+    # LDM-style scale factor: divide the whole cache by its std so the flow model always trains on
+    # ~unit-variance latents, regardless of the VAE's KL weight. Without this a low-KL (perceptual)
+    # VAE produces large-magnitude latents that break the z_0 ~ N(0, I) flow-matching prior -- the
+    # noise and the data end up at different radii and the rectified-flow ODE is poorly conditioned.
+    # The same scalar is stored on the DiT and re-applied at inference (encode -> /scale, decode ->
+    # *scale), so the autoencoder's latent scale is fully decoupled from the dynamics model.
+    s = ss = 0.0
+    cnt = 0
+    for i in range(0, M, batch_size):
+        c = z_all[i:i + batch_size].float()
+        s += c.sum().item(); ss += (c * c).sum().item(); cnt += c.numel()
+    mean = s / cnt
+    latent_scale = float(max((ss / cnt - mean * mean) ** 0.5, 1e-6))
+    z_all.div_(latent_scale)
+    print(f"[Cache] Latent scale (std) = {latent_scale:.4f} (mean {mean:.4f}); normalized cache to ~unit variance.")
+    return z_all, latent_scale
 
 
 def _vae_kl(mu, logvar):
@@ -51,16 +66,45 @@ def _vae_kl(mu, logvar):
     return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
 
 
-def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
-                      weight_decay=1e-4, kl_weight=1.0, kl_anneal_frac=0.3, device="cuda"):
-    """Train the convolutional VAE: reconstruction + beta * KL(N(mu,sigma^2) || N(0,1)).
+def build_lpips(device):
+    """Frozen LPIPS (VGG) perceptual metric, or None if the `lpips` package is unavailable.
 
-    Reconstruction is summed over pixels (per image) so it sits on the same scale as the
+    LPIPS scores two images by the distance between their activations in a pretrained,
+    perceptually-calibrated VGG -- so it penalises the BLUR that pixel MSE rewards (blur is the
+    L2-optimal hedge under uncertainty). Used purely as a differentiable loss: VGG and the
+    learned linear weights are frozen, so this module is never trained and is not part of any
+    optimizer. First call downloads the VGG weights. """
+    try:
+        import lpips
+    except ImportError:
+        return None
+    net = lpips.LPIPS(net="vgg", verbose=False).to(device)
+    net.eval()
+    for p in net.parameters():
+        p.requires_grad_(False)
+    return net
+
+
+def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
+                      weight_decay=1e-4, kl_weight=1.0, kl_anneal_frac=0.3, lpips_weight=0.0,
+                      device="cuda"):
+    """Train the convolutional VAE: reconstruction + lpips_weight * LPIPS + beta * KL.
+
+    Pixel reconstruction is summed over pixels (per image) so it sits on the same scale as the
     summed-over-dims KL, which makes `kl_weight` (beta) an O(1) knob. beta is linearly warmed
     up from 0 over the first `kl_anneal_frac` of training so the decoder can establish sharp
     reconstructions before the KL pressure kicks in -- the main guard against posterior
     collapse. Tuning by the logged numbers: if Val PSNR drops much and KL collapses toward 0,
     lower kl_weight; if KL stays very large (latent barely regularized), raise it.
+
+    `lpips_weight` > 0 adds a perceptual (LPIPS-VGG) term. This is the key fix for a latent whose
+    L2 distance does NOT track perceptual quality: it reshapes the latent geometry so that the
+    downstream flow model (which only ever minimises latent MSE) is implicitly optimising
+    perceptual quality, and it stops the decoder from rewarding blur. The pixel-MSE + KL balance
+    (and hence the unit-scale latent the dynamics phase assumes) is left intact, so this is a
+    drop-in: the perceptual term rides on top. LPIPS is taken in [0,1] via normalize=True.
+    Watch `Train LPIPS` falling alongside Val PSNR; expect Val PSNR itself to dip slightly vs a
+    pure-MSE VAE -- sharp is not MSE-optimal, and that is the point.
     """
     print("--- Phase 1: Training Autoencoder (VAE) ---")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -68,6 +112,13 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
     total_steps = epochs * len(train_loader)
     scheduler = build_warmup_cosine(optimizer, total_steps)
     ae.to(device)
+
+    perceptual = build_lpips(device) if lpips_weight > 0 else None
+    if lpips_weight > 0 and perceptual is None:
+        print("[Warn] lpips not installed (pip install lpips). Falling back to pixel + KL only.")
+        lpips_weight = 0.0
+    elif perceptual is not None:
+        print(f"[VAE] Perceptual loss ON: LPIPS-VGG, weight {lpips_weight}.")
 
     warmup_epochs = max(1, int(epochs * kl_anneal_frac))
 
@@ -78,6 +129,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         ae.train()
         tr_recon = torch.zeros((), device=device)
         tr_kl = torch.zeros((), device=device)
+        tr_perc = torch.zeros((), device=device)
         for ctx_frames, target_frame in train_loader:
             B, T, C, H, W = ctx_frames.shape
             x = ctx_frames.view(-1, C, H, W).to(device)
@@ -87,6 +139,10 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             recon_loss = F.mse_loss(recon, x, reduction="sum") / x.shape[0]
             kl = _vae_kl(mu, logvar)
             loss = recon_loss + beta * kl
+            if perceptual is not None:
+                perc = perceptual(recon, x, normalize=True).mean()   # inputs in [0,1]
+                loss = loss + lpips_weight * perc
+                tr_perc += perc.detach()
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -96,6 +152,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         ae.eval()
         val_mse = torch.zeros((), device=device)   # mean MSE -> comparable PSNR
         val_kl = torch.zeros((), device=device)
+        val_perc = torch.zeros((), device=device)
         with torch.no_grad():
             for ctx_frames, target_frame in val_loader:
                 B, T, C, H, W = ctx_frames.shape
@@ -103,6 +160,8 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
                 recon, mu, logvar = ae(x)
                 val_mse += F.mse_loss(recon, x)   # mean over all elements
                 val_kl += _vae_kl(mu, logvar)
+                if perceptual is not None:
+                    val_perc += perceptual(recon, x, normalize=True).mean()
 
         nb_tr, nb_val = len(train_loader), len(val_loader)
         val_mse_mean = val_mse.item() / nb_val
@@ -110,155 +169,76 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         epoch_time = time.time() - start_time
         current_lr = scheduler.get_last_lr()[0]
 
+        perc_str = ""
+        if perceptual is not None:
+            perc_str = f"Train LPIPS: {tr_perc.item()/nb_tr:.4f} | Val LPIPS: {val_perc.item()/nb_val:.4f} | "
         print(f"AE Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e} | "
               f"Beta: {beta:.5f} | Train Recon(sum): {tr_recon.item()/nb_tr:.4f} | "
-              f"Train KL: {tr_kl.item()/nb_tr:.2f} | Val MSE: {val_mse_mean:.8f} | "
+              f"Train KL: {tr_kl.item()/nb_tr:.2f} | {perc_str}Val MSE: {val_mse_mean:.8f} | "
               f"Val PSNR: {val_psnr:.2f} dB | Val KL: {val_kl.item()/nb_val:.2f}")
     return ae
 
 
-@torch.no_grad()
-def _latent_rollout_loss(dynamics, loader, criterion, device, max_batches=None):
-    """Free-running (eps=0) multi-step rollout loss on cached latents (no AE forward)."""
-    dynamics.eval()
-    total = torch.zeros((), device=device)
-    nb = 0
-    for bi, (z_seq, z_future) in enumerate(loader):
-        if max_batches is not None and bi >= max_batches:
-            break
-        if z_future.dim() == 4:  # horizon==1 -> restore the K dim
-            z_future = z_future.unsqueeze(1)
-        K = z_future.shape[1]
-        step_loss = torch.zeros((), device=device)
-        for k in range(K):
-            z_pred = dynamics(z_seq)
-            step_loss += criterion(z_pred, z_future[:, k])
-            z_seq = torch.cat([z_seq[:, 1:], z_pred.unsqueeze(1)], dim=1)
-        total += step_loss / K
-        nb += 1
-    return (total / max(1, nb)).item()
+def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
+                        weight_decay=1e-4, device="cuda"):
+    """Train the Diffusion Transformer with Rectified Flow (flow matching), CHUNK prediction.
 
+    The loaders yield (z_seq, z_1): the context-frame latents and the ground-truth chunk of the
+    next K = chunk_len frame latents (horizon == K), gathered from the frozen-VAE latent cache.
+    z_1 has shape (B, K, Cl, h, w) and the whole chunk is denoised at a single noise level:
 
-def _pixel_rollout_loss(model, loader, criterion, device, max_batches=None):
-    """Free-running (eps=0) multi-step rollout loss in pixel space (Pixel model)."""
-    model.eval()
-    total = torch.zeros((), device=device)
-    nb = 0
-    with torch.no_grad():
-        for bi, (ctx_frames, future_frames) in enumerate(loader):
-            if max_batches is not None and bi >= max_batches:
-                break
-            ctx_frames = ctx_frames.to(device)
-            future_frames = future_frames.to(device)
-            if future_frames.dim() == 4:
-                future_frames = future_frames.unsqueeze(1)
-            K = future_frames.shape[1]
-            context = ctx_frames
-            step_loss = torch.zeros((), device=device)
-            for k in range(K):
-                pred = model(context)
-                step_loss += criterion(pred, future_frames[:, k])
-                context = torch.cat([context[:, 1:], pred.unsqueeze(1)], dim=1)
-            total += step_loss / K
-            nb += 1
-    return (total / max(1, nb)).item()
+        z_0 ~ N(0, I)                       (noise, same (B,K,Cl,h,w) shape as z_1)
+        t   ~ U(0, 1)                       (one continuous time per sample, shared across the chunk)
+        z_t  = t * z_1 + (1 - t) * z_0      (linear interpolation -- the rectified-flow path)
+        v*   = z_1 - z_0                    (constant target velocity along that straight path)
+        loss = MSE(model(z_t, t, z_seq), v*)
 
-
-def train_dynamics(dynamics, train_loader, val_loader, epochs=15, learning_rate=1e-3, weight_decay=1e-4, device="cuda"):
-    """Train the latent dynamics model on precomputed latents.
-
-    `train_loader`/`val_loader` yield (z_seq, z_future) latent batches gathered from the cache
-    (see CachedLoader over the latent tensor), so the frozen AE is never re-run here.
+    Predicting the K-frame chunk jointly (rather than one autoregressive step) is what curbs
+    exposure bias on long rollouts. At inference an Euler ODE solver integrates the learned
+    velocity from noise (t=0) to the data (t=1), producing K frames per call; see eval.flow_sample.
     """
-    print("--- Phase 2: Training Latent Dynamics Model---")
-    optimizer = optim.AdamW(dynamics.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-    total_steps = epochs * len(train_loader)
-    scheduler = build_warmup_cosine(optimizer, total_steps)
-    criterion = nn.MSELoss()
-    dynamics.to(device)
-
-    for epoch in range(epochs):
-        start_time = time.time()
-
-        eps = 1.0 - epoch / max(1, epochs - 1)
-
-        dynamics.train()
-        train_loss = torch.zeros((), device=device)
-        for z_seq, z_future in train_loader:
-            # z_seq (B, T, Cl, h, w), z_future (B, K, Cl, h, w) -- float32 on device.
-            if z_future.dim() == 4:  # horizon==1 -> restore the K dim
-                z_future = z_future.unsqueeze(1)
-            B, K = z_seq.shape[0], z_future.shape[1]
-
-            optimizer.zero_grad(set_to_none=True)
-            loss = 0.0
-            for k in range(K):
-                z_pred = dynamics(z_seq)                    # (B, Cl, h, w)
-                z_true = z_future[:, k]
-                loss = loss + criterion(z_pred, z_true)
-                teacher = torch.rand(B, 1, 1, 1, device=device) < eps
-                z_next = torch.where(teacher, z_true, z_pred.detach())
-                z_seq = torch.cat([z_seq[:, 1:], z_next.unsqueeze(1)], dim=1)
-            loss = loss / K
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            train_loss += loss.detach()
-
-        train_rollout = _latent_rollout_loss(dynamics, train_loader, criterion, device, max_batches=30)
-        val_rollout = _latent_rollout_loss(dynamics, val_loader, criterion, device)
-
-        epoch_time = time.time() - start_time
-        current_lr = scheduler.get_last_lr()[0]
-
-        print(f"Dyn Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e} | Eps: {eps:.2f} | Train(ss): {train_loss.item()/len(train_loader):.5f} | Train(roll): {train_rollout:.5f} | Val(roll): {val_rollout:.5f}")
-
-
-def train_pixel_model(model, train_loader, val_loader, epochs=15, learning_rate=1e-3, weight_decay=1e-4, device="cuda"):
-    print("--- Training Pixel Dynamics Model ---")
+    print("--- Phase 2: Training Flow Matching DiT (chunk prediction) ---")
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
     total_steps = epochs * len(train_loader)
     scheduler = build_warmup_cosine(optimizer, total_steps)
-    criterion = nn.MSELoss()
     model.to(device)
 
+    def _flow_batch(z_seq, z_future):
+        # z_seq (B,T,Cl,h,w); z_future (B,K,Cl,h,w) (chunk). horizon==1 -> add the chunk axis.
+        if z_future.dim() == 4:
+            z_future = z_future.unsqueeze(1)
+        z1 = z_future.to(device)                           # (B, K, Cl, h, w)
+        z_seq = z_seq.to(device)
+        z0 = torch.randn_like(z1)
+        t = torch.rand(z1.shape[0], device=device)         # (B,) in [0,1], shared over the chunk
+        t_b = t.view(-1, 1, 1, 1, 1)
+        z_t = t_b * z1 + (1.0 - t_b) * z0
+        v_target = z1 - z0
+        v_pred = model(z_t, t, z_seq)
+        return F.mse_loss(v_pred, v_target)
+
     for epoch in range(epochs):
         start_time = time.time()
 
-        eps = 1.0 - epoch / max(1, epochs - 1)
-
         model.train()
-        train_loss = torch.zeros((), device=device)
-        for ctx_frames, future_frames in train_loader:
-            ctx_frames = ctx_frames.to(device)
-            future_frames = future_frames.to(device)
-            if future_frames.dim() == 4:
-                future_frames = future_frames.unsqueeze(1)
-            B, K = ctx_frames.shape[0], future_frames.shape[1]
-
+        tr_loss = torch.zeros((), device=device)
+        for z_seq, z_future in train_loader:
             optimizer.zero_grad(set_to_none=True)
-            context = ctx_frames
-            loss = 0.0
-            for k in range(K):
-                pred = model(context)                    # (B, C, H, W)
-                target = future_frames[:, k]
-                loss = loss + criterion(pred, target)
-                teacher = torch.rand(B, 1, 1, 1, device=device) < eps
-                nxt = torch.where(teacher, target, pred.detach())
-                context = torch.cat([context[:, 1:], nxt.unsqueeze(1)], dim=1)
-            loss = loss / K
+            loss = _flow_batch(z_seq, z_future)
             loss.backward()
             optimizer.step()
             scheduler.step()
-            train_loss += loss.detach()
+            tr_loss += loss.detach()
 
-        train_rollout = _pixel_rollout_loss(model, train_loader, criterion, device, max_batches=30)
-        val_rollout = _pixel_rollout_loss(model, val_loader, criterion, device)
+        model.eval()
+        val_loss = torch.zeros((), device=device)
+        with torch.no_grad():
+            for z_seq, z_future in val_loader:
+                val_loss += _flow_batch(z_seq, z_future)
 
+        nb_tr, nb_val = len(train_loader), len(val_loader)
         epoch_time = time.time() - start_time
-        current_lr = scheduler.get_last_lr()[0]
-
-        print(f"Pixel Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e} | Eps: {eps:.2f} | Train(ss): {train_loss.item()/len(train_loader):.5f} | Train(roll): {train_rollout:.5f} | Val(roll): {val_rollout:.5f}")
+        print(f"FM Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | "
+              f"LR: {scheduler.get_last_lr()[0]:.2e} | "
+              f"Train Loss: {tr_loss.item()/nb_tr:.5f} | Val Loss: {val_loss.item()/nb_val:.5f}")
     return model
