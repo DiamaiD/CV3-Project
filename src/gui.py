@@ -6,6 +6,7 @@ import shutil
 from tkinter import filedialog
 from src.main import run_training_pipeline
 from environments.env_bouncing import generate_bouncing_data
+from environments.env_inclined_plane import generate_slope_data
 
 CONFIG_FILE = "configs/model_config.json"
 
@@ -14,7 +15,7 @@ class TrainingGUI(ctk.CTk):
         super().__init__()
         self.title("Physics Video Model Trainer")
         self.geometry("1200x850")
-        
+
         self.huge_font = ctk.CTkFont(family="Consolas", size=18)
         self.bold_font = ctk.CTkFont(family="Consolas", size=18, weight="bold")
 
@@ -195,13 +196,21 @@ class TrainingGUI(ctk.CTk):
         self.datagen_frame = ctk.CTkFrame(self.tabview.tab("Data"))
         self.datagen_frame.pack(pady=10, padx=10, fill="x")
 
-        self.datagen_title = ctk.CTkLabel(self.datagen_frame, text="Generate a dataset (saved to data/<name>; regenerating replaces it)", font=self.bold_font)
+        self.datagen_title = ctk.CTkLabel(self.datagen_frame,
+                                          text="Generate a dataset (saved to data/<name>; regenerating replaces it)",
+                                          font=self.bold_font)
         self.datagen_title.grid(row=0, column=0, columnspan=6, padx=10, pady=(10, 0), sticky="w")
 
+        # Reihe 1 links: Ordnername des Datasets
         self.dataname_label = ctk.CTkLabel(self.datagen_frame, text="Name:", font=self.bold_font)
         self.dataname_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
         self.dataname_entry = ctk.CTkEntry(self.datagen_frame, width=150, font=self.huge_font)
-        self.dataname_entry.grid(row=1, column=1, columnspan=3, padx=10, pady=10, sticky="w")
+        self.dataname_entry.grid(row=1, column=1, columnspan=2, padx=10, pady=10, sticky="w")
+
+        self.datatype_label = ctk.CTkLabel(self.datagen_frame, text="Physics Type:", font=self.bold_font)
+        self.datatype_label.grid(row=1, column=3, padx=10, pady=10, sticky="e")
+        self.datatype_menu = ctk.CTkOptionMenu(self.datagen_frame, values=["bouncing", "inclined_plane"], font=self.huge_font, width=180, command=self._on_physics_type_changed)
+        self.datatype_menu.grid(row=1, column=4, columnspan=2, padx=10, pady=10, sticky="w")
 
         self.res_label = ctk.CTkLabel(self.datagen_frame, text="Resolution:", font=self.bold_font)
         self.res_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
@@ -249,6 +258,11 @@ class TrainingGUI(ctk.CTk):
 
         self.load_settings()
 
+    def _on_physics_type_changed(self, choice):
+        """Passt den Namensvorschlag automatisch an den gewählten Physik-Typ an."""
+        self.dataname_entry.delete(0, "end")
+        self.dataname_entry.insert(0, choice)
+
     def _list_environments(self):
         """Available environments = dataset folders under data/ (env maps to data/<env>)."""
         data_root = "data"
@@ -281,6 +295,8 @@ class TrainingGUI(ctk.CTk):
             n_traj = int(self.traj_entry.get())
             bmin, bmax = int(self.balls_min_entry.get()), int(self.balls_max_entry.get())
             smin, smax = float(self.speed_min_entry.get()), float(self.speed_max_entry.get())
+            # === NEU: Liest aus, welcher Physik-Typ generiert werden soll ===
+            env_type = self.datatype_menu.get()
         except ValueError:
             self.log_textbox.insert("end", "[Error] Data-generation fields must be valid numbers!\n")
             return
@@ -298,22 +314,32 @@ class TrainingGUI(ctk.CTk):
         data_dir = os.path.join("data", name)
         self.is_generating = True
         self.generate_button.configure(state="disabled", text="Generating...")
-        self.log_textbox.insert("end", f"[System] Generating {n_traj} trajectories ({res}x{res}) into {data_dir} ...\n")
+        self.log_textbox.insert("end",f"[System] Generating {n_traj} trajectories ({res}x{res}) using '{env_type}' physics engine into {data_dir} ...\n")
         self.log_textbox.see("end")
         threading.Thread(target=self._run_generation,
-                         args=(data_dir, n_traj, res, bmin, bmax, smin, smax), daemon=True).start()
+                         args=(data_dir, n_traj, res, bmin, bmax, smin, smax, env_type), daemon=True).start()
 
-    def _run_generation(self, data_dir, n_traj, res, bmin, bmax, smin, smax):
+    def _run_generation(self, data_dir, n_traj, res, bmin, bmax, smin, smax, env_type):
         def cb(done, total):
             self.after(0, lambda d=done, t=total: self.datagen_status.configure(text=f"{d}/{t}"))
+
         try:
-            # Remove the old dataset so no stale trajectories remain.
             if os.path.isdir(data_dir):
                 shutil.rmtree(data_dir)
-                self.after(0, lambda: self.log_textbox.insert("end", f"[System] Removed existing dataset at {data_dir}.\n"))
-            generate_bouncing_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
-                                   n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
-                                   progress_cb=cb)
+                self.after(0, lambda: self.log_textbox.insert("end",
+                                                              f"[System] Removed existing dataset at {data_dir}.\n"))
+
+            if env_type == "bouncing":
+                generate_bouncing_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
+                                       n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
+                                       progress_cb=cb)
+            elif env_type == "inclined_plane":
+                generate_slope_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
+                                    n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
+                                    progress_cb=cb)
+            else:
+                raise ValueError(f"Unknown physics type: {env_type}")
+
             self.after(0, lambda: self._on_generation_done(data_dir, n_traj))
         except Exception as e:
             self.after(0, lambda err=e: self.log_textbox.insert("end", f"[Error] Generation failed: {err}\n"))
