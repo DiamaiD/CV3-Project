@@ -3,66 +3,170 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CNNVAE(nn.Module):
-    """ Part 1: a convolutional VAE that compresses a 64x64 frame into a SPATIAL latent grid
-    (latent_ch x latent_grid x latent_grid). Its KL term makes that latent normalized AND smooth
-    -- i.e. good for the dynamics model, not merely good for reconstruction.
 
-    `latent_grid` sets how far the frame is spatially compressed (the number of stride-2 stages is
-    log2(img_size / latent_grid), and the encoder + decoder are built to match):
-      * 8  -> 8x8   : more compression, 64 DiT tokens/frame, ~2 GB latent cache.
-      * 16 -> 16x16 : less compression -- motion is more spatially LOCAL in the latent (a moving
-                      ball shifts a few cells rather than reshaping one cell's vector), which is
-                      often easier for the dynamics model to predict -- at 4x the token count
-                      (256/frame, ~16x attention) and 4x the latent-cache memory (~8 GB).
+def _group_norm(ch, max_groups=32):
+    """GroupNorm with the largest group count (up to 32) that divides `ch`."""
+    g = max_groups
+    while g > 1 and ch % g != 0:
+        g //= 2
+    return nn.GroupNorm(g, ch, eps=1e-6)
 
-    The encoder produces a per-cell Gaussian posterior (mu, logvar). Training samples
-    z ~ N(mu, sigma^2) (reparameterized) and minimizes reconstruction + beta * KL to N(0, 1).
-    The dynamics pipeline uses the deterministic posterior mean mu as 'the latent' (see
-    `encode`); the KL keeps mu ~unit-Gaussian per channel, so no external normalization is
-    needed downstream. """
-    def __init__(self, latent_ch=32, latent_grid=8, img_size=64):
+
+class ResBlock(nn.Module):
+    """LDM/Stable-Diffusion residual block: (GroupNorm -> SiLU -> 3x3 conv) x2 + a skip (1x1 conv
+    when in/out channels differ, else identity).
+
+    GroupNorm -- not BatchNorm -- is the norm of choice for generative CNNs: it normalizes each
+    sample over channel groups, so it is batch-size independent and has no train/eval running-stat
+    mismatch, both of which matter for a decoder that must emit clean images at any batch size.
+    The second conv is zero-initialised, so for matched channels the block is the identity at init
+    -- training starts stable and the block only learns to deviate. """
+    def __init__(self, in_ch, out_ch):
         super().__init__()
-        n_stages = int(round(math.log2(img_size / latent_grid)))   # stride-2 down/up steps
+        self.norm1 = _group_norm(in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2 = _group_norm(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        nn.init.zeros_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
+
+    def forward(self, x):
+        h = self.conv1(F.silu(self.norm1(x)))
+        h = self.conv2(F.silu(self.norm2(h)))
+        return self.skip(x) + h
+
+
+class AttnBlock(nn.Module):
+    """Spatial self-attention over the HxW grid (every cell attends to every cell) -- the global-
+    context block at the low-resolution bottleneck of SOTA VAEs/UNets. Convs are local; one
+    attention layer at the smallest grid lets the latent capture long-range structure cheaply
+    (8x8 = 64 tokens). The output projection is zero-initialised, so the block is the identity at
+    init. """
+    def __init__(self, ch, n_heads=4):
+        super().__init__()
+        assert ch % n_heads == 0, "channels must be divisible by n_heads"
+        self.n_heads = n_heads
+        self.norm = _group_norm(ch)
+        self.qkv = nn.Conv2d(ch, 3 * ch, 1)
+        self.proj = nn.Conv2d(ch, ch, 1)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        q, k, v = self.qkv(self.norm(x)).chunk(3, dim=1)
+        # (B, C, H, W) -> (B, n_heads, H*W, head_dim) for scaled_dot_product_attention.
+        to_heads = lambda t: t.reshape(B, self.n_heads, C // self.n_heads, H * W).transpose(2, 3)
+        out = F.scaled_dot_product_attention(to_heads(q), to_heads(k), to_heads(v))
+        out = out.transpose(2, 3).reshape(B, C, H, W)
+        return x + self.proj(out)
+
+
+class Downsample(nn.Module):
+    """Halve the spatial size with a stride-2 conv."""
+    def __init__(self, ch):
+        super().__init__()
+        self.conv = nn.Conv2d(ch, ch, 3, stride=2, padding=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Upsample(nn.Module):
+    """Double the spatial size by nearest-neighbour resize + 3x3 conv (resize-conv). Replaces the
+    strided transposed conv, whose overlapping kernel is the classic source of the checkerboard
+    artifacts seen in generated images. """
+    def __init__(self, ch):
+        super().__init__()
+        self.conv = nn.Conv2d(ch, ch, 3, padding=1)
+
+    def forward(self, x):
+        return self.conv(F.interpolate(x, scale_factor=2.0, mode="nearest"))
+
+
+class CNNVAE(nn.Module):
+    """ Part 1: a convolutional VAE -- an LDM/Stable-Diffusion AutoencoderKL, scaled down -- that
+    compresses a 64x64 frame into a SPATIAL latent grid (latent_ch x latent_grid x latent_grid).
+
+    Per resolution level the channel width is base_ch * ch_mult[level]:
+      encoder: conv_in -> [ResBlock x num_res_blocks, Downsample] per level
+               -> bottleneck (ResBlock, AttnBlock, ResBlock) -> GroupNorm/SiLU -> mu & logvar heads
+      decoder: conv_in -> bottleneck (ResBlock, AttnBlock, ResBlock)
+               -> [Upsample, ResBlock x num_res_blocks] per level -> GroupNorm/SiLU -> conv_out -> sigmoid
+
+    `latent_grid` sets the compression (number of 2x down/up stages = log2(img_size/latent_grid)):
+      * 8  -> 8x8   : more compression, 64 DiT tokens/frame, ~2 GB latent cache.
+      * 16 -> 16x16 : motion stays more spatially LOCAL in the latent (often easier for the
+                      dynamics model) at 4x the token count and latent-cache memory.
+
+    The encoder produces a per-cell Gaussian posterior (mu, logvar); the dynamics pipeline uses the
+    deterministic mean mu (see `encode`), normalized to ~unit variance by the latent cache. """
+    def __init__(self, latent_ch=32, latent_grid=8, img_size=64,
+                 base_ch=64, ch_mult=(1, 2, 4), num_res_blocks=1, attn=True):
+        super().__init__()
+        n_stages = int(round(math.log2(img_size / latent_grid)))   # 2x down/up steps
         assert n_stages >= 1 and img_size == latent_grid * (2 ** n_stages), \
             f"img_size {img_size} must be latent_grid {latent_grid} x a power of two (>=2)"
         self.latent_ch = latent_ch
         self.latent_grid = latent_grid
 
-        # Encoder trunk: (n_stages - 1) stride-2 convs (channels 3 -> 32 -> 64 -> ...); the final
-        # stride-2 stage is the (mu, logvar) heads. At latent_grid=8 this is 64->32->16 then ->8.
-        trunk_widths = [32 * (2 ** i) for i in range(n_stages - 1)]
-        enc_layers, prev = [], 3
-        for w in trunk_widths:
-            enc_layers += [nn.Conv2d(prev, w, 3, stride=2, padding=1), nn.ReLU()]
-            prev = w
-        self.enc = nn.Sequential(*enc_layers)              # -> (B, prev, 2*latent_grid, 2*latent_grid)
+        widths = [base_ch * ch_mult[min(i, len(ch_mult) - 1)] for i in range(n_stages)]
 
-        # Two heads map the trunk down to the latent grid: mean and log-variance.
-        self.to_mu = nn.Conv2d(prev, latent_ch, 3, stride=2, padding=1)
-        self.to_logvar = nn.Conv2d(prev, latent_ch, 3, stride=2, padding=1)
+        # ----- Encoder: conv_in at full res, then per level (Downsample FIRST, then ResBlocks) -----
+        # Downsampling BEFORE the residual blocks keeps every heavy conv off the full 64x64 grid:
+        # conv cost scales with H*W, so a ResBlock at 64x64 costs 4x the same block at 32x32. The
+        # only ops that touch 64x64 are conv_in (3 input channels) and the first strided Downsample
+        # (whose cost is counted at its 32x32 output), both cheap; all ResBlocks run at <=32x32.
+        self.conv_in = nn.Conv2d(3, widths[0], 3, padding=1)
+        enc, cur = [], widths[0]
+        for i in range(n_stages):
+            enc.append(Downsample(cur))                    # res halves first
+            for _ in range(num_res_blocks):
+                enc.append(ResBlock(cur, widths[i])); cur = widths[i]
+        self.enc = nn.Sequential(*enc)
 
-        # Decoder mirrors the encoder: n_stages stride-2 transposed convs back up to img_size.
-        dec_layers, prev = [], latent_ch
-        for w in reversed(trunk_widths):
-            dec_layers += [nn.ConvTranspose2d(prev, w, 3, stride=2, padding=1, output_padding=1),
-                           nn.ReLU()]
-            prev = w
-        dec_layers += [nn.ConvTranspose2d(prev, 3, 3, stride=2, padding=1, output_padding=1),
-                       nn.Sigmoid()]
-        self.decoder = nn.Sequential(*dec_layers)
+        # Bottleneck at the latent grid: ResBlock - (Attn) - ResBlock, then norm + mu/logvar heads.
+        mid_enc = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+        self.enc_mid = nn.Sequential(*mid_enc)
+        self.enc_norm = _group_norm(cur)
+        self.to_mu = nn.Conv2d(cur, latent_ch, 3, padding=1)
+        self.to_logvar = nn.Conv2d(cur, latent_ch, 3, padding=1)
+        nn.init.zeros_(self.to_logvar.weight); nn.init.zeros_(self.to_logvar.bias)  # logvar 0 -> std 1 at init
+
+        # ----- Decoder: conv_in from latent, bottleneck, then per level (ResBlocks FIRST, then Upsample) -----
+        # Mirror of the encoder: do the residual work at the LOW resolution, then upsample. Channels
+        # are also reduced before each upsample, so the resize-conv runs at the smaller width. The
+        # only 64x64 ops are the final Upsample's conv and conv_out (3 output channels) -- no
+        # ResBlock ever runs at full resolution.
+        self.dec_in = nn.Conv2d(latent_ch, cur, 3, padding=1)
+        mid_dec = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+        self.dec_mid = nn.Sequential(*mid_dec)
+        dec = []
+        for i in reversed(range(n_stages)):
+            for _ in range(num_res_blocks):
+                dec.append(ResBlock(cur, widths[i])); cur = widths[i]
+            dec.append(Upsample(cur))                       # upsample after the heavy work
+        self.dec = nn.Sequential(*dec)
+        self.dec_norm = _group_norm(cur)
+        self.conv_out = nn.Conv2d(cur, 3, 3, padding=1)
+
+    def _encode_trunk(self, x):
+        h = self.enc_mid(self.enc(self.conv_in(x)))
+        return F.silu(self.enc_norm(h))
 
     def encode_dist(self, x):
         """Posterior over the latent grid: (mu, logvar), each (B, latent_ch, latent_grid, latent_grid)."""
-        h = self.enc(x)
+        h = self._encode_trunk(x)
         return self.to_mu(h), self.to_logvar(h)
 
     def encode(self, x):
         """Deterministic latent for the dynamics pipeline: the posterior mean mu."""
-        return self.to_mu(self.enc(x))  # (B, latent_ch, latent_grid, latent_grid)
+        return self.to_mu(self._encode_trunk(x))  # (B, latent_ch, latent_grid, latent_grid)
 
     def decode(self, z):
-        return self.decoder(z)  # (B, 3, 64, 64)
+        h = self.dec(self.dec_mid(self.dec_in(z)))
+        return torch.sigmoid(self.conv_out(F.silu(self.dec_norm(h))))  # (B, 3, 64, 64) in [0,1]
 
     @staticmethod
     def reparameterize(mu, logvar):
@@ -184,7 +288,7 @@ class DiffusionTransformer(nn.Module):
         # operates entirely in this normalized space; callers apply encode -> /latent_scale and
         # decode -> *latent_scale at the VAE boundary. Stored as a buffer so it rides in the
         # checkpoint. See train.build_latent_cache.
-        self.register_buffer("latent_scale", torch.tensor(float(latent_scale)))
+        self.register_buffer("latent_scale", torch.as_tensor(latent_scale, dtype=torch.float32))
         self.seq_len = chunk_len * grid * grid           # K * gh * gw tokens
         self.in_ch = (context_len + 1) * latent_ch       # context frames (broadcast) + this noisy frame
 

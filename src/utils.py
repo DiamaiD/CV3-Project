@@ -46,17 +46,37 @@ class StreamToLogger:
     def isatty(self):
         return False
 
+
+def _unwrap(stream):
+    """Peel off any StreamToLogger wrappers to reach the genuine console stream.
+
+    Repeated runs in one process (the GUI stays alive between runs) must each wrap the REAL
+    stdout/stderr -- never the previous run's wrapper. Nesting wrappers is what made every run
+    re-timestamp the line and write it into all earlier runs' log files.
+    """
+    while isinstance(stream, StreamToLogger):
+        stream = stream.stream
+    return stream
+
 def setup_run_folder(env_name="bouncing"):
     now = datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
     run_folder = f"{now}__{env_name}"
     run_dir = os.path.join(os.getcwd(), "runs", run_folder)
-    
+
     os.makedirs(run_dir, exist_ok=True)
     log_filepath = os.path.join(run_dir, "log.txt")
-    
-    sys.stdout = StreamToLogger(sys.stdout, log_filepath)
-    sys.stderr = StreamToLogger(sys.stderr, log_filepath)
-    
+
+    # Wrap the true console streams, restoring first so back-to-back runs never nest wrappers.
+    sys.stdout = StreamToLogger(_unwrap(sys.stdout), log_filepath)
+    sys.stderr = StreamToLogger(_unwrap(sys.stderr), log_filepath)
+
     print(f"--- Started Run: {run_folder} ---")
-    
+
     return run_dir, log_filepath
+
+
+def teardown_run_logging():
+    """Restore the original console streams so the process is clean once a run finishes
+    (otherwise stray prints between runs keep landing in the last run's log.txt)."""
+    sys.stdout = _unwrap(sys.stdout)
+    sys.stderr = _unwrap(sys.stderr)

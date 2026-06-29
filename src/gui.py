@@ -42,16 +42,9 @@ class TrainingGUI(ctk.CTk):
         self.ctx_entry.grid(row=0, column=3, padx=10, pady=10)
 
         self.seed_label = ctk.CTkLabel(self.general_frame, text="Seed:", font=self.bold_font)
-        self.seed_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.seed_label.grid(row=0, column=4, padx=10, pady=10, sticky="e")
         self.seed_entry = ctk.CTkEntry(self.general_frame, width=150, font=self.huge_font, placeholder_text="(blank = random)")
-        self.seed_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
-
-        # Checked = keep the decoded frame + latent caches resident in GPU VRAM (fastest, no
-        # per-batch host->device copies). Unchecked = cache in system RAM and stream batches to the GPU.
-        self.vram_var = ctk.BooleanVar(value=False)
-        self.vram_check = ctk.CTkCheckBox(self.general_frame, text="Load dataset into VRAM",
-                                          font=self.bold_font, variable=self.vram_var)
-        self.vram_check.grid(row=1, column=2, columnspan=3, padx=10, pady=10, sticky="w")
+        self.seed_entry.grid(row=0, column=5, padx=10, pady=10, sticky="w")
 
         # ===== Autoencoder (Phase 1: continuous VAE) =====
         self.ae_frame = ctk.CTkFrame(train_tab)
@@ -177,6 +170,19 @@ class TrainingGUI(ctk.CTk):
         self.best_of_n_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
         self.best_of_n_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.best_of_n_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
+
+        # Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights.
+        self.ema_decay_label = ctk.CTkLabel(self.dyn_frame, text="EMA Decay:", font=self.bold_font)
+        self.ema_decay_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.ema_decay_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.ema_decay_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
+
+        # Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off).
+        # Rollout-robustness regularizer vs exposure bias; try ~0.02-0.1.
+        self.ctx_noise_label = ctk.CTkLabel(self.dyn_frame, text="Ctx Noise:", font=self.bold_font)
+        self.ctx_noise_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
+        self.ctx_noise_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.ctx_noise_entry.grid(row=4, column=3, padx=10, pady=10, sticky="w")
 
         # ===== Actions =====
         self.actions_frame = ctk.CTkFrame(train_tab)
@@ -362,9 +368,10 @@ class TrainingGUI(ctk.CTk):
                 self.eval_batches_entry.delete(0, "end"); self.eval_batches_entry.insert(0, str(c.get("eval_max_batches", 24)))
                 self.chunk_len_entry.delete(0, "end"); self.chunk_len_entry.insert(0, str(c.get("chunk_len", 5)))
                 self.best_of_n_entry.delete(0, "end"); self.best_of_n_entry.insert(0, str(c.get("eval_best_of_n", 1)))
+                self.ema_decay_entry.delete(0, "end"); self.ema_decay_entry.insert(0, str(c.get("dit_ema_decay", 0.999)))
+                self.ctx_noise_entry.delete(0, "end"); self.ctx_noise_entry.insert(0, str(c.get("dit_context_noise", 0.0)))
                 self.seed_entry.delete(0, "end"); self.seed_entry.insert(0, str(c.get("seed", "42")))
                 self._set_entry(self.ae_entry, str(c.get("ae_checkpoint", "")))
-                self.vram_var.set(bool(c.get("cache_in_vram", False)))
                 self.dataname_entry.delete(0, "end"); self.dataname_entry.insert(0, str(c.get("datagen_name", c.get("env_name", "bouncing"))))
                 self.res_entry.delete(0, "end"); self.res_entry.insert(0, str(c.get("resolution", 64)))
                 self.traj_entry.delete(0, "end"); self.traj_entry.insert(0, str(c.get("n_trajectories", 5000)))
@@ -397,6 +404,8 @@ class TrainingGUI(ctk.CTk):
             self.eval_batches_entry.insert(0, "24")
             self.chunk_len_entry.insert(0, "5")
             self.best_of_n_entry.insert(0, "1")
+            self.ema_decay_entry.insert(0, "0.999")
+            self.ctx_noise_entry.insert(0, "0.0")
             self.dataname_entry.insert(0, "bouncing")
             self.res_entry.insert(0, "64")
             self.traj_entry.insert(0, "5000")
@@ -429,6 +438,8 @@ class TrainingGUI(ctk.CTk):
                 "eval_max_batches": int(self.eval_batches_entry.get()),
                 "chunk_len": int(self.chunk_len_entry.get()),
                 "eval_best_of_n": int(self.best_of_n_entry.get()),
+                "dit_ema_decay": float(self.ema_decay_entry.get()),
+                "dit_context_noise": float(self.ctx_noise_entry.get()),
                 "seed": self.seed_entry.get().strip(),
                 "ae_checkpoint": self.ae_entry.get().strip(),
                 "datagen_name": self.dataname_entry.get().strip(),
@@ -437,8 +448,7 @@ class TrainingGUI(ctk.CTk):
                 "n_balls_min": int(self.balls_min_entry.get()),
                 "n_balls_max": int(self.balls_max_entry.get()),
                 "speed_min": float(self.speed_min_entry.get()),
-                "speed_max": float(self.speed_max_entry.get()),
-                "cache_in_vram": bool(self.vram_var.get())
+                "speed_max": float(self.speed_max_entry.get())
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=4)
@@ -473,8 +483,10 @@ class TrainingGUI(ctk.CTk):
             dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
             eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
-            cache_in_vram=c.get('cache_in_vram', False), latent_grid=c.get('latent_grid', 8),
+            latent_grid=c.get('latent_grid', 8),
             chunk_len=c.get('chunk_len', 5), eval_best_of_n=c.get('eval_best_of_n', 1),
+            dit_ema_decay=c.get('dit_ema_decay', 0.999),
+            dit_context_noise=c.get('dit_context_noise', 0.0),
             dit_d_model=c.get('dit_d_model', 256), dit_n_layers=c.get('dit_n_layers', 6),
             dit_n_heads=c.get('dit_n_heads', 8), inference_steps=c.get('inference_steps', 10)
         )

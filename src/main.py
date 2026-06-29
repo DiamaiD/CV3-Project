@@ -9,16 +9,26 @@ from src.dataset import FrameCache, CachedLoader
 from src.models import CNNVAE, DiffusionTransformer
 from src.train import train_autoencoder, build_latent_cache, train_flow_matching
 from src.eval import run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample
-from src.utils import setup_run_folder
+from src.utils import setup_run_folder, teardown_run_logging
 
 
-def run_training_pipeline(data_dir, env_name, context_len=5,
+def run_training_pipeline(*args, **kwargs):
+    """Thin wrapper: run the pipeline, then always restore the console streams so the run's
+    log handler is torn down whether it finished, hit a missing-data return, or raised."""
+    try:
+        return _run_pipeline(*args, **kwargs)
+    finally:
+        teardown_run_logging()
+
+
+def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
-                          ae_lpips_weight=0.0,
-                          dyn_learning_rate=3e-4, dyn_weight_decay=1e-4,
+                          ae_lpips_weight=0.0, ae_grad_clip=10.0,
+                          dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
+                          dit_ema_decay=0.999, dit_context_noise=0.0,
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
-                          seed=None, ae_checkpoint="", cache_in_vram=False, latent_grid=8,
+                          seed=None, ae_checkpoint="", latent_grid=8,
                           chunk_len=5, dit_d_model=256, dit_n_layers=6, dit_n_heads=8, inference_steps=10):
     """Two-stage latent world model:
       Phase 1 -- a continuous CNNVAE compresses 64x64 frames to 32x8x8 latents.
@@ -34,10 +44,8 @@ def run_training_pipeline(data_dir, env_name, context_len=5,
     else:
         device = "cpu"
 
-    # Where the decoded frame / latent caches live. VRAM keeps everything resident on the GPU
-    # (fastest, no per-batch host->device copies); otherwise cache in system RAM and move
-    # each batch to the GPU on the fly.
-    cache_device = "cuda" if (cache_in_vram and device == "cuda") else "cpu"
+    # Decoded frame / latent caches live in system RAM; each batch is moved to the GPU on the fly.
+    cache_device = "cpu"
 
     if seed is not None and seed != "":
         seed = int(seed)
@@ -88,7 +96,7 @@ def run_training_pipeline(data_dir, env_name, context_len=5,
                                pixel_loader(val_trajs, 1, False, ae_batch_size),
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
                                weight_decay=ae_weight_decay, kl_weight=ae_kl_weight,
-                               lpips_weight=ae_lpips_weight, device=device)
+                               lpips_weight=ae_lpips_weight, grad_clip=ae_grad_clip, device=device)
 
     # Reconstruction baseline grid (truth | recon | abs error). Always written -- even when the
     # VAE is loaded from a checkpoint -- as a cheap fixed read on latent quality.
@@ -111,7 +119,8 @@ def run_training_pipeline(data_dir, env_name, context_len=5,
     dit = train_flow_matching(dit, latent_loader(train_trajs, chunk_len, True, dyn_batch_size),
                               latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
                               epochs=dyn_epochs, learning_rate=dyn_learning_rate,
-                              weight_decay=dyn_weight_decay, device=device)
+                              weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
+                              ema_decay=dit_ema_decay, context_noise=dit_context_noise, device=device)
     torch.save(dit.state_dict(), os.path.join(run_dir, "dit.pth"))
 
     # ===== Phase 3: evaluation + rollout GIFs =====
@@ -152,9 +161,13 @@ if __name__ == "__main__":
     parser.add_argument("--ae_weight_decay", type=float, default=1e-2)
     parser.add_argument("--ae_kl_weight", type=float, default=0.005, help="VAE KL weight (beta). Lower if reconstructions blur / KL collapses; raise if the latent is barely regularized.")
     parser.add_argument("--ae_lpips_weight", type=float, default=0.0, help="Perceptual (LPIPS-VGG) loss weight on the VAE. 0 = off (pixel+KL only). ~1.0 makes latent L2 track perceptual quality, the key fix for the prediction-blur ceiling. Needs `pip install lpips`.")
+    parser.add_argument("--ae_grad_clip", type=float, default=10.0, help="Max global grad norm for the VAE (clipped each step). Safety net against the loss spikes a deeper LPIPS backbone (e.g. VGG) can trigger. The sum-reduced recon makes norms large, so this is loose; the logged GradNorm (pre-clip) shows the steady-state -- tighten toward ~2-3x it once observed.")
     parser.add_argument("--latent_grid", type=int, default=8, help="VAE latent spatial size (8 -> 8x8, 16 -> 16x16). 16 makes motion more spatially local for the DiT at 4x token/cache cost. Requires retraining the VAE (8x8 checkpoints are incompatible).")
     parser.add_argument("--dyn_learning_rate", type=float, default=3e-4)
     parser.add_argument("--dyn_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--dit_grad_clip", type=float, default=3.0, help="Max global grad norm for the DiT (clipped each step). Safety net against loss-spike NaN divergence; the logged GradNorm shows whether it's biting. Set ~2-3x above the steady-state norm (which rode 1.2-1.4 late in training, so 1.0 was clipping healthy steps).")
+    parser.add_argument("--dit_ema_decay", type=float, default=0.999, help="Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights. Standard diffusion/flow trick, usually worth a few tenths of a dB.")
+    parser.add_argument("--dit_context_noise", type=float, default=0.0, help="Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off; in normalized-latent units). Rollout-robustness regularizer against exposure bias; trades a little 1-step accuracy for steadier long horizons. Try ~0.02-0.1.")
     parser.add_argument("--chunk_len", type=int, default=5, help="Chunk prediction: number of future frames (K) the DiT denoises jointly per call")
     parser.add_argument("--dit_d_model", type=int, default=256, help="DiT width (must be divisible by dit_n_heads)")
     parser.add_argument("--dit_n_layers", type=int, default=6, help="DiT depth")
@@ -165,7 +178,6 @@ if __name__ == "__main__":
     parser.add_argument("--eval_best_of_n", type=int, default=1, help="Sample N independent rollouts per window and also report the best (per trajectory). Reveals if single-sample MSE punishes valid alternative futures. Multiplies eval cost by N.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible runs")
     parser.add_argument("--ae_checkpoint", type=str, default="", help="Path to a saved autoencoder.pth to reuse (skips Phase 1)")
-    parser.add_argument("--cache_in_vram", action="store_true", help="Keep the decoded frame + latent caches in GPU VRAM instead of system RAM")
     args = parser.parse_args()
 
     run_training_pipeline(
@@ -173,12 +185,14 @@ if __name__ == "__main__":
         context_len=args.context_len, ae_batch_size=args.ae_batch_size, dyn_batch_size=args.dyn_batch_size,
         ae_epochs=args.ae_epochs, dyn_epochs=args.dyn_epochs,
         ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
-        ae_lpips_weight=args.ae_lpips_weight,
+        ae_lpips_weight=args.ae_lpips_weight, ae_grad_clip=args.ae_grad_clip,
         dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay,
+        dit_grad_clip=args.dit_grad_clip, dit_ema_decay=args.dit_ema_decay,
+        dit_context_noise=args.dit_context_noise,
         eval_horizon=args.eval_horizon, eval_max_batches=args.eval_max_batches,
         eval_best_of_n=args.eval_best_of_n,
         seed=args.seed, ae_checkpoint=args.ae_checkpoint,
-        cache_in_vram=args.cache_in_vram, latent_grid=args.latent_grid,
+        latent_grid=args.latent_grid,
         chunk_len=args.chunk_len, dit_d_model=args.dit_d_model, dit_n_layers=args.dit_n_layers,
         dit_n_heads=args.dit_n_heads, inference_steps=args.inference_steps
     )
