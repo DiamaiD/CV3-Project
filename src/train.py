@@ -67,7 +67,7 @@ def _vae_kl(mu, logvar):
     return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
 
 
-def build_lpips(device, net="vgg"):
+def build_lpips(device, net="alex"):
     """Frozen LPIPS perceptual metric, or None if the `lpips` package is unavailable.
 
     LPIPS scores two images by the distance between their activations in a pretrained,
