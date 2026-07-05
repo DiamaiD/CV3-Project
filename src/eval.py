@@ -87,7 +87,7 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
     asks whether at least one sample tracks the truth -- i.e. whether the model captured the
     dynamics distribution or genuinely failed. It multiplies eval cost by N. """
     model_type = "FlowMatch"
-    print(f"\n--- Phase 3: Final Test Set Evaluation ({model_type}) ---")
+    print(f"\n--- Phase 4: Final Test Set Evaluation ({model_type}) ---")
 
     vis_ctx = vis_target = vis_pred = None
     bestN = best_of_n > 1

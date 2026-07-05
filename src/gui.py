@@ -20,16 +20,10 @@ class TrainingGUI(ctk.CTk):
 
         os.makedirs("configs", exist_ok=True)
 
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(pady=10, padx=20, fill="x")
-        self.tabview.add("Training")
-        self.tabview.add("Data")
-
-        train_tab = self.tabview.tab("Training")
-
-        # ===== General =====
-        self.general_frame = ctk.CTkFrame(train_tab)
-        self.general_frame.pack(pady=(10, 5), padx=10, fill="x")
+        # General settings sit above the tabview and the action buttons below it, so both stay
+        # visible from every tab; each pipeline phase gets its own uncrowded tab.
+        self.general_frame = ctk.CTkFrame(self)
+        self.general_frame.pack(pady=(10, 0), padx=20, fill="x")
 
         self.env_label = ctk.CTkLabel(self.general_frame, text="Environment:", font=self.bold_font)
         self.env_label.grid(row=0, column=0, padx=10, pady=10, sticky="e")
@@ -46,9 +40,22 @@ class TrainingGUI(ctk.CTk):
         self.seed_entry = ctk.CTkEntry(self.general_frame, width=150, font=self.huge_font, placeholder_text="(blank = random)")
         self.seed_entry.grid(row=0, column=5, padx=10, pady=10, sticky="w")
 
-        # ===== Autoencoder (Phase 1: continuous VAE) =====
-        self.ae_frame = ctk.CTkFrame(train_tab)
-        self.ae_frame.pack(pady=5, padx=10, fill="x")
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.pack(pady=5, padx=20, fill="x")
+        self.tabview.add("VAE")
+        self.tabview.add("Dynamics")
+        self.tabview.add("Decoder")
+        self.tabview.add("Evaluation")
+        self.tabview.add("Data")
+
+        vae_tab = self.tabview.tab("VAE")
+        dyn_tab = self.tabview.tab("Dynamics")
+        dec_tab = self.tabview.tab("Decoder")
+        eval_tab = self.tabview.tab("Evaluation")
+
+        # ===== VAE tab (Phase 1: continuous VAE) =====
+        self.ae_frame = ctk.CTkFrame(vae_tab)
+        self.ae_frame.pack(pady=10, padx=10, fill="x")
 
         self.ae_section_label = ctk.CTkLabel(self.ae_frame, text="Autoencoder (VAE)", font=self.bold_font)
         self.ae_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
@@ -92,16 +99,54 @@ class TrainingGUI(ctk.CTk):
         self.lpips_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
         self.lpips_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
 
-        self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
-        self.ae_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
-        self.ae_entry.grid(row=3, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
-        self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
-        self.ae_browse_button.grid(row=3, column=7, padx=10, pady=10)
+        # VAE latent channels per grid cell. More = higher recon ceiling + richer per-cell code for
+        # the DiT, at linearly more latent-cache size (DiT token count is unchanged). Changing this
+        # requires retraining the VAE; use the latent probe to check the new latent's predictability.
+        self.latent_ch_label = ctk.CTkLabel(self.ae_frame, text="Latent Ch:", font=self.bold_font)
+        self.latent_ch_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
+        self.latent_ch_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.latent_ch_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
 
-        # ===== Flow Matching (DiT) (Phase 2) =====
-        self.dyn_frame = ctk.CTkFrame(train_tab)
-        self.dyn_frame.pack(pady=5, padx=10, fill="x")
+        # Max global grad norm for the VAE phase (clipped every step; the logged GradNorm is pre-clip).
+        self.ae_clip_label = ctk.CTkLabel(self.ae_frame, text="Grad Clip:", font=self.bold_font)
+        self.ae_clip_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
+        self.ae_clip_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.ae_clip_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
+
+        # Residual blocks per level in the PHASE-1 decoder. 0 = weak decoder (plain conv+upsample,
+        # no bottleneck/attention): forces the encoder to write an explicit, predictable latent;
+        # pair with Decoder Training epochs > 0 so Phase 3 trains a full decoder for rendering.
+        # A reused AE checkpoint must have been built with the same setting.
+        self.dec_res_label = ctk.CTkLabel(self.ae_frame, text="Dec ResBlocks:", font=self.bold_font)
+        self.dec_res_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
+        self.dec_res_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.dec_res_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
+
+        # Residual blocks per level in the ENCODER. 0 = weak encoder (plain conv+downsample, no
+        # bottleneck/attention) -- cannot write an entangled latent at all; 0/0 with the decoder
+        # approximates the pre-residual VAE. Reused AE checkpoints must match this setting.
+        self.enc_res_label = ctk.CTkLabel(self.ae_frame, text="Enc ResBlocks:", font=self.bold_font)
+        self.enc_res_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
+        self.enc_res_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.enc_res_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
+
+        # LPIPS backbone for Phase 1. alex is cheaper and historically gave the more PREDICTABLE
+        # latent (better DiT); vgg pushed recon sharper but traded predictability away every time.
+        self.ae_lpips_net_label = ctk.CTkLabel(self.ae_frame, text="LPIPS Net:", font=self.bold_font)
+        self.ae_lpips_net_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
+        self.ae_lpips_net_menu = ctk.CTkOptionMenu(self.ae_frame, values=["alex", "vgg"], font=self.huge_font, width=100)
+        self.ae_lpips_net_menu.grid(row=3, column=7, padx=10, pady=10, sticky="w")
+
+        self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
+        self.ae_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
+        self.ae_entry.grid(row=4, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
+        self.ae_browse_button.grid(row=4, column=7, padx=10, pady=10)
+
+        # ===== Dynamics tab (Phase 2: Flow Matching DiT) =====
+        self.dyn_frame = ctk.CTkFrame(dyn_tab)
+        self.dyn_frame.pack(pady=10, padx=10, fill="x")
 
         self.dyn_section_label = ctk.CTkLabel(self.dyn_frame, text="Flow Matching (DiT)", font=self.bold_font)
         self.dyn_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
@@ -141,52 +186,206 @@ class TrainingGUI(ctk.CTk):
         self.dit_heads_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_heads_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
 
-        # Euler ODE steps used to sample one frame from the flow.
-        self.infsteps_label = ctk.CTkLabel(self.dyn_frame, text="Infer Steps:", font=self.bold_font)
-        self.infsteps_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
-        self.infsteps_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.infsteps_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
-
-        # Max rollout length at eval time; the report tests every horizon from 1 to this.
-        self.eval_horizon_label = ctk.CTkLabel(self.dyn_frame, text="Eval Horizon:", font=self.bold_font)
-        self.eval_horizon_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.eval_horizon_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.eval_horizon_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-
-        # Cap on test batches rolled out at eval (each window = horizon x infer-steps DiT forwards).
-        self.eval_batches_label = ctk.CTkLabel(self.dyn_frame, text="Eval Batches:", font=self.bold_font)
-        self.eval_batches_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
-        self.eval_batches_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.eval_batches_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
-
         # Chunk prediction: number of future frames (K) the DiT denoises jointly per call.
         self.chunk_len_label = ctk.CTkLabel(self.dyn_frame, text="Chunk Len:", font=self.bold_font)
-        self.chunk_len_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
+        self.chunk_len_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
         self.chunk_len_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.chunk_len_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
-
-        # Best-of-N eval: sample N rollouts per window, also report the best (multiplies eval cost).
-        self.best_of_n_label = ctk.CTkLabel(self.dyn_frame, text="Best-of-N:", font=self.bold_font)
-        self.best_of_n_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
-        self.best_of_n_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.best_of_n_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
+        self.chunk_len_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
 
         # Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights.
         self.ema_decay_label = ctk.CTkLabel(self.dyn_frame, text="EMA Decay:", font=self.bold_font)
-        self.ema_decay_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.ema_decay_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
         self.ema_decay_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.ema_decay_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
+        self.ema_decay_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
 
         # Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off).
         # Rollout-robustness regularizer vs exposure bias; try ~0.02-0.1.
         self.ctx_noise_label = ctk.CTkLabel(self.dyn_frame, text="Ctx Noise:", font=self.bold_font)
-        self.ctx_noise_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
+        self.ctx_noise_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
         self.ctx_noise_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.ctx_noise_entry.grid(row=4, column=3, padx=10, pady=10, sticky="w")
+        self.ctx_noise_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
 
-        # ===== Actions =====
-        self.actions_frame = ctk.CTkFrame(train_tab)
-        self.actions_frame.pack(pady=(5, 10), padx=10, fill="x")
+        # Max global grad norm for the DiT phase (clipped every step; the logged GradNorm is pre-clip).
+        self.dit_clip_label = ctk.CTkLabel(self.dyn_frame, text="Grad Clip:", font=self.bold_font)
+        self.dit_clip_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
+        self.dit_clip_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_clip_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
+
+        # Time as its own token axis (factorized time+space positions) instead of squashing the
+        # context frames into channels. ~(T+K)/K x more tokens -> proportionally slower per step;
+        # dit.pth checkpoints are NOT interchangeable between the two layouts.
+        self.temporal_check = ctk.CTkCheckBox(self.dyn_frame, text="Temporal Tokens", font=self.bold_font)
+        self.temporal_check.grid(row=3, column=6, columnspan=2, padx=10, pady=10, sticky="w")
+
+        # torch.compile for the DiT phase (off = eager). "cudagraphs" needs nothing extra: it
+        # replays fwd/bwd as CUDA graphs, erasing the kernel-launch overhead that dominates at
+        # batch 64. "default"/"reduce-overhead" add Inductor codegen, which on Windows needs MSVC
+        # plus a triton-windows wheel matching torch. Falls back to eager if the backend fails;
+        # dit.pth is identical either way.
+        self.compile_label = ctk.CTkLabel(self.dyn_frame, text="Compile:", font=self.bold_font)
+        self.compile_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
+        self.compile_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["off", "cudagraphs", "default", "reduce-overhead"], font=self.huge_font, width=150)
+        self.compile_menu.grid(row=5, column=1, padx=10, pady=10, sticky="w")
+
+        # DiT training compute precision (weights/eval/checkpoints are fp32 in every mode).
+        # bf16/fp16 give ~2x epoch speed at >= 8192 token-rows/step; fp16 adds dynamic loss
+        # scaling whose inf/nan step-skip doubles as a spike guard (bf16 measured DIVERGENT on
+        # the temporal layout at every LR). fp32 = no autocast, the proven-stable reference.
+        self.precision_label = ctk.CTkLabel(self.dyn_frame, text="Precision:", font=self.bold_font)
+        self.precision_label.grid(row=5, column=2, padx=10, pady=10, sticky="e")
+        self.precision_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
+        self.precision_menu.grid(row=5, column=3, padx=10, pady=10, sticky="w")
+
+        # Grad-spike guard: drop any step whose pre-clip grad norm exceeds this multiple of the
+        # running mean of accepted norms (0 = off). fp32 never spikes, so a spike is a low-precision
+        # artifact clipping can't fix; dropping the whole step keeps AdamW's moments clean. This is
+        # what makes bf16/compiled-fp16 as stable as fp32. ~4 is safe; lower catches more.
+        self.spike_label = ctk.CTkLabel(self.dyn_frame, text="Spike Guard:", font=self.bold_font)
+        self.spike_label.grid(row=5, column=4, padx=10, pady=10, sticky="e")
+        self.spike_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.spike_entry.grid(row=5, column=5, padx=10, pady=10, sticky="w")
+
+        # Flow-matching timestep sampling. logit_normal (SD3) draws t=sigmoid(N(0,1)), focusing
+        # training on the hard middle of the trajectory; uniform is plain U(0,1). Same optimum.
+        self.tdist_label = ctk.CTkLabel(self.dyn_frame, text="T-Dist:", font=self.bold_font)
+        self.tdist_label.grid(row=6, column=0, padx=10, pady=10, sticky="e")
+        self.tdist_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["logit_normal", "uniform"], font=self.huge_font, width=150)
+        self.tdist_menu.grid(row=6, column=1, padx=10, pady=10, sticky="w")
+
+        # Velocity loss. mse = standard flow-matching L2. huber = pseudo-Huber, whose per-element
+        # gradient saturates for large errors, curbing precision-induced spikes at the source.
+        self.loss_label = ctk.CTkLabel(self.dyn_frame, text="Loss:", font=self.bold_font)
+        self.loss_label.grid(row=6, column=2, padx=10, pady=10, sticky="e")
+        self.loss_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["mse", "huber"], font=self.huge_font, width=100)
+        self.loss_menu.grid(row=6, column=3, padx=10, pady=10, sticky="w")
+
+        # Pseudo-Huber transition constant c (used only when Loss = huber). Targets have per-element
+        # std ~1.4 in the normalized latent space, so c~1.0 balances robustness against fidelity.
+        self.huberc_label = ctk.CTkLabel(self.dyn_frame, text="Huber C:", font=self.bold_font)
+        self.huberc_label.grid(row=6, column=4, padx=10, pady=10, sticky="e")
+        self.huberc_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.huberc_entry.grid(row=6, column=5, padx=10, pady=10, sticky="w")
+
+        # Reuse a trained dit.pth (skips Phase 2, like Reuse AE skips Phase 1). Pair it with the
+        # ae_checkpoint from the SAME run -- a DiT only understands the latent space it trained on.
+        self.dit_label = ctk.CTkLabel(self.dyn_frame, text="Reuse DiT:", font=self.bold_font)
+        self.dit_label.grid(row=7, column=0, padx=10, pady=10, sticky="e")
+        self.dit_entry = ctk.CTkEntry(self.dyn_frame, width=400, font=self.huge_font, placeholder_text="path to dit.pth (blank = train new)")
+        self.dit_entry.grid(row=7, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.dit_browse_button = ctk.CTkButton(self.dyn_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_dit)
+        self.dit_browse_button.grid(row=7, column=7, padx=10, pady=10)
+
+        # ===== Decoder tab (Phase 3): trains a FRESH full-capacity decoder from scratch on clean +
+        # DiT-predicted latents, after DiT training and before the final eval. Encoder + DiT stay
+        # frozen, so the latent space and dit.pth remain valid; only the rendering changes. This is
+        # what restores quality when Phase 1 used a weak decoder (Dec ResBlocks = 0). Needs a trained
+        # DiT, so it is skipped when there is no Phase 2 (no epochs and no reused checkpoint). =====
+        self.dec_frame = ctk.CTkFrame(dec_tab)
+        self.dec_frame.pack(pady=10, padx=10, fill="x")
+
+        self.dec_section_label = ctk.CTkLabel(self.dec_frame, text="Decoder Training (Phase 3)", font=self.bold_font)
+        self.dec_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
+
+        # 0 = Phase 3 off.
+        self.dec_epochs_label = ctk.CTkLabel(self.dec_frame, text="Epochs:", font=self.bold_font)
+        self.dec_epochs_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.dec_epochs_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_epochs_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
+
+        self.dec_lr_label = ctk.CTkLabel(self.dec_frame, text="Learn Rate:", font=self.bold_font)
+        self.dec_lr_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
+        self.dec_lr_entry = ctk.CTkEntry(self.dec_frame, width=100, font=self.huge_font)
+        self.dec_lr_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
+
+        self.dec_lpips_label = ctk.CTkLabel(self.dec_frame, text="LPIPS Weight:", font=self.bold_font)
+        self.dec_lpips_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
+        self.dec_lpips_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_lpips_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
+
+        # Max global grad norm for the decoder fine-tune (clipped every step).
+        self.dec_clip_label = ctk.CTkLabel(self.dec_frame, text="Grad Clip:", font=self.bold_font)
+        self.dec_clip_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
+        self.dec_clip_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_clip_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+
+        # Max free-running rollout depth the decoder trains on (random 1..K per batch).
+        self.dec_rollout_label = ctk.CTkLabel(self.dec_frame, text="Rollout K:", font=self.bold_font)
+        self.dec_rollout_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.dec_rollout_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_rollout_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+
+        # Fraction of batches decoding clean cached latents (anchors reconstruction quality).
+        self.dec_clean_label = ctk.CTkLabel(self.dec_frame, text="Clean Frac:", font=self.bold_font)
+        self.dec_clean_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.dec_clean_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_clean_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+
+        # Residual blocks per level of the Phase-3 decoder trained from scratch (1 = full residual
+        # decoder with bottleneck+attention -- the usual choice when Phase 1 used a weak decoder).
+        self.dec_res3_label = ctk.CTkLabel(self.dec_frame, text="ResBlocks:", font=self.bold_font)
+        self.dec_res3_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
+        self.dec_res3_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_res3_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
+
+        # Data cap: trajectories used to build the decoder-training windows (~90+ windows each;
+        # the full train split is ~4000). Epoch time scales ~linearly with it.
+        self.dec_trajs_label = ctk.CTkLabel(self.dec_frame, text="Train Trajs:", font=self.bold_font)
+        self.dec_trajs_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
+        self.dec_trajs_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
+        self.dec_trajs_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
+
+        # LPIPS backbone for Phase 3. The latent is FROZEN here, so vgg's sharper gradients cannot
+        # hurt predictability -- they only shape the renderer; worth trying for crisper rollouts.
+        self.dec_lpips_net_label = ctk.CTkLabel(self.dec_frame, text="LPIPS Net:", font=self.bold_font)
+        self.dec_lpips_net_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
+        self.dec_lpips_net_menu = ctk.CTkOptionMenu(self.dec_frame, values=["alex", "vgg"], font=self.huge_font, width=100)
+        self.dec_lpips_net_menu.grid(row=3, column=1, padx=10, pady=10, sticky="w")
+
+        # Reuse a previously trained autoencoder_final.pth as the eval renderer (skips Phase 3
+        # training). For DiT sweeps on a fixed VAE: comparable pixel metrics at zero Phase-3 cost.
+        # Must come from a run with the same latent space + matching res-block settings.
+        self.dec_ckpt_label = ctk.CTkLabel(self.dec_frame, text="Reuse Dec:", font=self.bold_font)
+        self.dec_ckpt_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.dec_ckpt_entry = ctk.CTkEntry(self.dec_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder_final.pth (blank = train Phase 3)")
+        self.dec_ckpt_entry.grid(row=4, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.dec_ckpt_browse_button = ctk.CTkButton(self.dec_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_dec)
+        self.dec_ckpt_browse_button.grid(row=4, column=7, padx=10, pady=10)
+
+        # ===== Evaluation tab (Phase 3: rollout evaluation / inference) =====
+        self.eval_frame = ctk.CTkFrame(eval_tab)
+        self.eval_frame.pack(pady=10, padx=10, fill="x")
+
+        self.eval_section_label = ctk.CTkLabel(self.eval_frame, text="Evaluation / Inference", font=self.bold_font)
+        self.eval_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
+
+        # Euler ODE steps used to sample one frame from the flow (also used by Phase 4 to generate
+        # its training latents, so the decoder sees exactly the latents it will render).
+        self.infsteps_label = ctk.CTkLabel(self.eval_frame, text="Infer Steps:", font=self.bold_font)
+        self.infsteps_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.infsteps_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.infsteps_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
+
+        # Max rollout length at eval time; the report tests every horizon from 1 to this.
+        self.eval_horizon_label = ctk.CTkLabel(self.eval_frame, text="Eval Horizon:", font=self.bold_font)
+        self.eval_horizon_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
+        self.eval_horizon_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.eval_horizon_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
+
+        # Cap on test batches rolled out at eval (each window = horizon x infer-steps DiT forwards).
+        self.eval_batches_label = ctk.CTkLabel(self.eval_frame, text="Eval Batches:", font=self.bold_font)
+        self.eval_batches_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
+        self.eval_batches_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.eval_batches_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
+
+        # Best-of-N eval: sample N rollouts per window, also report the best (multiplies eval cost).
+        self.best_of_n_label = ctk.CTkLabel(self.eval_frame, text="Best-of-N:", font=self.bold_font)
+        self.best_of_n_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
+        self.best_of_n_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.best_of_n_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+
+        # ===== Actions (below the tabs, always visible) =====
+        self.actions_frame = ctk.CTkFrame(self)
+        self.actions_frame.pack(pady=(0, 5), padx=20, fill="x")
         # Spacer columns on the outside keep the two buttons grouped together in the centre.
         self.actions_frame.grid_columnconfigure(0, weight=1)
         self.actions_frame.grid_columnconfigure(3, weight=1)
@@ -278,6 +477,20 @@ class TrainingGUI(ctk.CTk):
             self.ae_entry.delete(0, "end")
             self.ae_entry.insert(0, path)
 
+    def _browse_dit(self):
+        path = filedialog.askopenfilename(title="Select dit.pth",
+                                          filetypes=[("PyTorch checkpoint", "*.pth"), ("All files", "*.*")])
+        if path:
+            self.dit_entry.delete(0, "end")
+            self.dit_entry.insert(0, path)
+
+    def _browse_dec(self):
+        path = filedialog.askopenfilename(title="Select autoencoder_final.pth",
+                                          filetypes=[("PyTorch checkpoint", "*.pth"), ("All files", "*.*")])
+        if path:
+            self.dec_ckpt_entry.delete(0, "end")
+            self.dec_ckpt_entry.insert(0, path)
+
     def start_generation(self):
         if self.is_training or self.is_generating:
             return
@@ -358,7 +571,10 @@ class TrainingGUI(ctk.CTk):
                 self.ae_epochs_entry.delete(0, "end"); self.ae_epochs_entry.insert(0, str(c.get("ae_epochs", 10)))
                 self.ae_kl_entry.delete(0, "end"); self.ae_kl_entry.insert(0, str(c.get("ae_kl_weight", 0.005)))
                 self.lpips_entry.delete(0, "end"); self.lpips_entry.insert(0, str(c.get("ae_lpips_weight", 0.0)))
+                self.ae_lpips_net_menu.set(c.get("ae_lpips_net", "alex"))
+                self.dec_lpips_net_menu.set(c.get("dec_lpips_net", "alex"))
                 self.latent_grid_entry.delete(0, "end"); self.latent_grid_entry.insert(0, str(c.get("latent_grid", 8)))
+                self.latent_ch_entry.delete(0, "end"); self.latent_ch_entry.insert(0, str(c.get("latent_ch", 32)))
                 self.dit_dmodel_entry.delete(0, "end"); self.dit_dmodel_entry.insert(0, str(c.get("dit_d_model", 256)))
                 self.dit_layers_entry.delete(0, "end"); self.dit_layers_entry.insert(0, str(c.get("dit_n_layers", 6)))
                 self.dit_heads_entry.delete(0, "end"); self.dit_heads_entry.insert(0, str(c.get("dit_n_heads", 8)))
@@ -370,8 +586,29 @@ class TrainingGUI(ctk.CTk):
                 self.best_of_n_entry.delete(0, "end"); self.best_of_n_entry.insert(0, str(c.get("eval_best_of_n", 1)))
                 self.ema_decay_entry.delete(0, "end"); self.ema_decay_entry.insert(0, str(c.get("dit_ema_decay", 0.999)))
                 self.ctx_noise_entry.delete(0, "end"); self.ctx_noise_entry.insert(0, str(c.get("dit_context_noise", 0.0)))
+                self.temporal_check.select() if c.get("dit_temporal", False) else self.temporal_check.deselect()
+                self.compile_menu.set(c.get("dit_compile", "off"))
+                self.precision_menu.set(c.get("dit_precision", "bf16"))
+                self.spike_entry.delete(0, "end"); self.spike_entry.insert(0, str(c.get("dit_spike_factor", 4.0)))
+                self.tdist_menu.set(c.get("dit_t_dist", "logit_normal"))
+                self.loss_menu.set(c.get("dit_loss", "mse"))
+                self.huberc_entry.delete(0, "end"); self.huberc_entry.insert(0, str(c.get("dit_huber_c", 1.0)))
+                self.ae_clip_entry.delete(0, "end"); self.ae_clip_entry.insert(0, str(c.get("ae_grad_clip", 10.0)))
+                self.dec_res_entry.delete(0, "end"); self.dec_res_entry.insert(0, str(c.get("vae_dec_res_blocks", 1)))
+                self.enc_res_entry.delete(0, "end"); self.enc_res_entry.insert(0, str(c.get("vae_enc_res_blocks", 1)))
+                self.dec_res3_entry.delete(0, "end"); self.dec_res3_entry.insert(0, str(c.get("dec_res_blocks", 1)))
+                self.dec_trajs_entry.delete(0, "end"); self.dec_trajs_entry.insert(0, str(c.get("dec_n_train_traj", 1000)))
+                self.dit_clip_entry.delete(0, "end"); self.dit_clip_entry.insert(0, str(c.get("dit_grad_clip", 3.0)))
+                self.dec_clip_entry.delete(0, "end"); self.dec_clip_entry.insert(0, str(c.get("dec_grad_clip", 10.0)))
+                self.dec_epochs_entry.delete(0, "end"); self.dec_epochs_entry.insert(0, str(c.get("dec_epochs", 0)))
+                self.dec_lr_entry.delete(0, "end"); self.dec_lr_entry.insert(0, str(c.get("dec_learning_rate", 0.0001)))
+                self.dec_lpips_entry.delete(0, "end"); self.dec_lpips_entry.insert(0, str(c.get("dec_lpips_weight", 1.0)))
+                self.dec_rollout_entry.delete(0, "end"); self.dec_rollout_entry.insert(0, str(c.get("dec_rollout_k", 5)))
+                self.dec_clean_entry.delete(0, "end"); self.dec_clean_entry.insert(0, str(c.get("dec_clean_frac", 0.3)))
                 self.seed_entry.delete(0, "end"); self.seed_entry.insert(0, str(c.get("seed", "42")))
                 self._set_entry(self.ae_entry, str(c.get("ae_checkpoint", "")))
+                self._set_entry(self.dit_entry, str(c.get("dit_checkpoint", "")))
+                self._set_entry(self.dec_ckpt_entry, str(c.get("dec_checkpoint", "")))
                 self.dataname_entry.delete(0, "end"); self.dataname_entry.insert(0, str(c.get("datagen_name", c.get("env_name", "bouncing"))))
                 self.res_entry.delete(0, "end"); self.res_entry.insert(0, str(c.get("resolution", 64)))
                 self.traj_entry.delete(0, "end"); self.traj_entry.insert(0, str(c.get("n_trajectories", 5000)))
@@ -394,7 +631,10 @@ class TrainingGUI(ctk.CTk):
             self.ae_epochs_entry.insert(0, "20")
             self.ae_kl_entry.insert(0, "0.005")
             self.lpips_entry.insert(0, "1.0")
+            self.ae_lpips_net_menu.set("alex")
+            self.dec_lpips_net_menu.set("alex")
             self.latent_grid_entry.insert(0, "8")
+            self.latent_ch_entry.insert(0, "32")
             self.dit_dmodel_entry.insert(0, "256")
             self.dit_layers_entry.insert(0, "6")
             self.dit_heads_entry.insert(0, "8")
@@ -406,6 +646,25 @@ class TrainingGUI(ctk.CTk):
             self.best_of_n_entry.insert(0, "1")
             self.ema_decay_entry.insert(0, "0.999")
             self.ctx_noise_entry.insert(0, "0.0")
+            self.temporal_check.deselect()
+            self.compile_menu.set("off")
+            self.precision_menu.set("bf16")
+            self.spike_entry.insert(0, "4.0")
+            self.tdist_menu.set("logit_normal")
+            self.loss_menu.set("mse")
+            self.huberc_entry.insert(0, "1.0")
+            self.ae_clip_entry.insert(0, "10.0")
+            self.dit_clip_entry.insert(0, "3.0")
+            self.dec_clip_entry.insert(0, "10.0")
+            self.dec_res_entry.insert(0, "1")
+            self.enc_res_entry.insert(0, "1")
+            self.dec_res3_entry.insert(0, "1")
+            self.dec_trajs_entry.insert(0, "1000")
+            self.dec_epochs_entry.insert(0, "0")
+            self.dec_lr_entry.insert(0, "0.0005")
+            self.dec_lpips_entry.insert(0, "1.0")
+            self.dec_rollout_entry.insert(0, "5")
+            self.dec_clean_entry.insert(0, "0.3")
             self.dataname_entry.insert(0, "bouncing")
             self.res_entry.insert(0, "64")
             self.traj_entry.insert(0, "5000")
@@ -428,7 +687,10 @@ class TrainingGUI(ctk.CTk):
                 "ae_epochs": int(self.ae_epochs_entry.get()),
                 "ae_kl_weight": float(self.ae_kl_entry.get()),
                 "ae_lpips_weight": float(self.lpips_entry.get()),
+                "ae_lpips_net": self.ae_lpips_net_menu.get(),
+                "dec_lpips_net": self.dec_lpips_net_menu.get(),
                 "latent_grid": int(self.latent_grid_entry.get()),
+                "latent_ch": int(self.latent_ch_entry.get()),
                 "dit_d_model": int(self.dit_dmodel_entry.get()),
                 "dit_n_layers": int(self.dit_layers_entry.get()),
                 "dit_n_heads": int(self.dit_heads_entry.get()),
@@ -440,8 +702,29 @@ class TrainingGUI(ctk.CTk):
                 "eval_best_of_n": int(self.best_of_n_entry.get()),
                 "dit_ema_decay": float(self.ema_decay_entry.get()),
                 "dit_context_noise": float(self.ctx_noise_entry.get()),
+                "dit_temporal": bool(self.temporal_check.get()),
+                "dit_compile": self.compile_menu.get(),
+                "dit_precision": self.precision_menu.get(),
+                "dit_spike_factor": float(self.spike_entry.get()),
+                "dit_t_dist": self.tdist_menu.get(),
+                "dit_loss": self.loss_menu.get(),
+                "dit_huber_c": float(self.huberc_entry.get()),
+                "ae_grad_clip": float(self.ae_clip_entry.get()),
+                "dit_grad_clip": float(self.dit_clip_entry.get()),
+                "dec_grad_clip": float(self.dec_clip_entry.get()),
+                "vae_dec_res_blocks": int(self.dec_res_entry.get()),
+                "vae_enc_res_blocks": int(self.enc_res_entry.get()),
+                "dec_res_blocks": int(self.dec_res3_entry.get()),
+                "dec_n_train_traj": int(self.dec_trajs_entry.get()),
+                "dec_epochs": int(self.dec_epochs_entry.get()),
+                "dec_learning_rate": float(self.dec_lr_entry.get()),
+                "dec_lpips_weight": float(self.dec_lpips_entry.get()),
+                "dec_rollout_k": int(self.dec_rollout_entry.get()),
+                "dec_clean_frac": float(self.dec_clean_entry.get()),
                 "seed": self.seed_entry.get().strip(),
                 "ae_checkpoint": self.ae_entry.get().strip(),
+                "dit_checkpoint": self.dit_entry.get().strip(),
+                "dec_checkpoint": self.dec_ckpt_entry.get().strip(),
                 "datagen_name": self.dataname_entry.get().strip(),
                 "resolution": int(self.res_entry.get()),
                 "n_trajectories": int(self.traj_entry.get()),
@@ -480,13 +763,31 @@ class TrainingGUI(ctk.CTk):
             ae_epochs=c['ae_epochs'], dyn_epochs=c['dyn_epochs'],
             ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
             ae_kl_weight=c.get('ae_kl_weight', 0.005), ae_lpips_weight=c.get('ae_lpips_weight', 0.0),
+            ae_lpips_net=c.get('ae_lpips_net', 'alex'), dec_lpips_net=c.get('dec_lpips_net', 'alex'),
             dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
             eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
-            latent_grid=c.get('latent_grid', 8),
+            dit_checkpoint=c.get('dit_checkpoint', ""),
+            latent_grid=c.get('latent_grid', 8), latent_ch=c.get('latent_ch', 32),
+            vae_enc_res_blocks=c.get('vae_enc_res_blocks', 1),
+            vae_dec_res_blocks=c.get('vae_dec_res_blocks', 1),
+            dec_res_blocks=c.get('dec_res_blocks', 1),
+            dec_n_train_traj=c.get('dec_n_train_traj', 1000),
+            dec_checkpoint=c.get('dec_checkpoint', ""),
             chunk_len=c.get('chunk_len', 5), eval_best_of_n=c.get('eval_best_of_n', 1),
             dit_ema_decay=c.get('dit_ema_decay', 0.999),
             dit_context_noise=c.get('dit_context_noise', 0.0),
+            dit_temporal=c.get('dit_temporal', False),
+            dit_compile=c.get('dit_compile', "off"),
+            dit_precision=c.get('dit_precision', "bf16"),
+            dit_spike_factor=c.get('dit_spike_factor', 4.0),
+            dit_t_dist=c.get('dit_t_dist', "logit_normal"),
+            dit_loss=c.get('dit_loss', "mse"), dit_huber_c=c.get('dit_huber_c', 1.0),
+            ae_grad_clip=c.get('ae_grad_clip', 10.0), dit_grad_clip=c.get('dit_grad_clip', 3.0),
+            dec_grad_clip=c.get('dec_grad_clip', 10.0),
+            dec_epochs=c.get('dec_epochs', 0), dec_learning_rate=c.get('dec_learning_rate', 5e-4),
+            dec_lpips_weight=c.get('dec_lpips_weight', 1.0), dec_rollout_k=c.get('dec_rollout_k', 5),
+            dec_clean_frac=c.get('dec_clean_frac', 0.3),
             dit_d_model=c.get('dit_d_model', 256), dit_n_layers=c.get('dit_n_layers', 6),
             dit_n_heads=c.get('dit_n_heads', 8), inference_steps=c.get('inference_steps', 10)
         )

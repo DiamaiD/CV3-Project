@@ -1,4 +1,5 @@
 import argparse
+import json
 import torch
 import random
 import numpy as np
@@ -7,7 +8,8 @@ import os
 
 from src.dataset import FrameCache, CachedLoader
 from src.models import CNNVAE, DiffusionTransformer
-from src.train import train_autoencoder, build_latent_cache, train_flow_matching
+from src.train import (train_autoencoder, build_latent_cache, train_flow_matching,
+                       score_latent_predictability, retrain_decoder)
 from src.eval import run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample
 from src.utils import setup_run_folder, teardown_run_logging
 
@@ -24,23 +26,42 @@ def run_training_pipeline(*args, **kwargs):
 def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
-                          ae_lpips_weight=0.0, ae_grad_clip=10.0,
+                          ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0,
                           dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
-                          dit_ema_decay=0.999, dit_context_noise=0.0,
+                          dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16", dit_temporal=False,
+                          dit_compile="off", dit_spike_factor=4.0,
+                          dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
+                          dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
+                          dec_rollout_k=5, dec_clean_frac=0.3, dec_grad_clip=10.0, dec_res_blocks=1,
+                          dec_n_train_traj=1000, dec_checkpoint="",
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
-                          seed=None, ae_checkpoint="", latent_grid=8,
+                          seed=None, ae_checkpoint="", dit_checkpoint="", latent_grid=8, latent_ch=32,
+                          vae_enc_res_blocks=1, vae_dec_res_blocks=1,
                           chunk_len=5, dit_d_model=256, dit_n_layers=6, dit_n_heads=8, inference_steps=10):
-    """Two-stage latent world model:
-      Phase 1 -- a continuous CNNVAE compresses 64x64 frames to 32x8x8 latents.
+    """Latent world model pipeline:
+      Phase 1 -- a continuous CNNVAE compresses 64x64 frames to latent_ch x grid x grid latents
+                 (optionally with a WEAK decoder so the encoder writes a predictable latent).
       Phase 2 -- a Diffusion Transformer learns the next-frame latent by Rectified Flow
                  (flow matching); inference integrates its velocity field with an Euler ODE solver.
+      Phase 3 -- (optional) a fresh full-capacity decoder is trained from scratch against the
+                 frozen latent space on clean + DiT-predicted latents (rendering only).
+      Phase 4 -- free-running rollout evaluation + GIFs with the deployed decoder.
     """
+    # Captured before any other local is created, so this is exactly the effective arguments.
+    # Written into the run folder because the log alone does not record every knob (e.g. the
+    # res-block settings), which makes runs impossible to reconstruct later.
+    run_config = dict(locals())
     run_dir, log_filepath = setup_run_folder(f"{env_name}_flow")
+    with open(os.path.join(run_dir, "run_config.json"), "w") as f:
+        json.dump(run_config, f, indent=4)
 
     if torch.cuda.is_available():
         device = "cuda"
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        # All conv input shapes are fixed (64x64 frames, fixed batch), so cudnn's autotuner can
+        # pick the fastest kernels once per shape instead of using safe defaults.
+        torch.backends.cudnn.benchmark = True
     else:
         device = "cpu"
 
@@ -56,11 +77,13 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         print(f"Random seed: {seed}")
 
     print(f"Using device: {device} | Latent Flow Matching | Context: {context_len} frames | Chunk: {chunk_len}")
-    print(f"Cache: {cache_device.upper()} | Inference steps: {inference_steps} | Latent grid: {latent_grid}x{latent_grid}")
+    print(f"Cache: {cache_device.upper()} | Inference steps: {inference_steps} | Latent: {latent_ch}x{latent_grid}x{latent_grid} | "
+          f"ResBlocks enc/dec: {vae_enc_res_blocks}/{vae_dec_res_blocks} (Phase 3 dec: {dec_res_blocks})")
     print(f"VAE -> LR: {ae_learning_rate} | WD: {ae_weight_decay} | Batch: {ae_batch_size} | "
           f"Beta: {ae_kl_weight} | LPIPS: {ae_lpips_weight}")
     print(f"DiT -> LR: {dyn_learning_rate} | WD: {dyn_weight_decay} | Batch: {dyn_batch_size} | "
-          f"d_model: {dit_d_model} | layers: {dit_n_layers} | heads: {dit_n_heads}")
+          f"d_model: {dit_d_model} | layers: {dit_n_layers} | heads: {dit_n_heads} | "
+          f"context layout: {'temporal tokens' if dit_temporal else 'channel-squash'}")
 
     all_trajs = glob.glob(os.path.join(data_dir, "traj-*"))
     if not all_trajs:
@@ -84,10 +107,16 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                             shuffle=shuffle, horizon=horizon)
 
     # ===== Phase 1: continuous VAE =====
-    ae = CNNVAE(latent_ch=32, latent_grid=latent_grid).to(device)
+    # 0 res blocks trains that half of the Phase-1 VAE WEAK (plain conv + down/upsample): a weak
+    # decoder forces the encoder to write an explicit, predictable latent; a weak encoder cannot
+    # write an entangled one at all. Phase 3 can train a full decoder afterwards for rendering.
+    # A reused ae_checkpoint must have been built with the same two settings.
+    ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
+                enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=vae_dec_res_blocks).to(device)
 
-    if ae_checkpoint and os.path.exists(ae_checkpoint):
-        ae.load_state_dict(torch.load(ae_checkpoint, map_location=device))
+    vae_trained = not (ae_checkpoint and os.path.exists(ae_checkpoint))
+    if not vae_trained:
+        ae.load_state_dict(torch.load(ae_checkpoint, map_location=device, weights_only=True))
         print(f"Loaded autoencoder from {ae_checkpoint} -- skipping Phase 1.")
     else:
         if ae_checkpoint:
@@ -96,7 +125,8 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                pixel_loader(val_trajs, 1, False, ae_batch_size),
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
                                weight_decay=ae_weight_decay, kl_weight=ae_kl_weight,
-                               lpips_weight=ae_lpips_weight, grad_clip=ae_grad_clip, device=device)
+                               lpips_weight=ae_lpips_weight, lpips_net=ae_lpips_net,
+                               grad_clip=ae_grad_clip, device=device)
 
     # Reconstruction baseline grid (truth | recon | abs error). Always written -- even when the
     # VAE is loaded from a checkpoint -- as a cheap fixed read on latent quality.
@@ -108,22 +138,93 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     z_all, latent_scale = build_latent_cache(ae, frame_cache.frames, device, cache_device)
     latent_ch, grid = z_all.shape[1], z_all.shape[-1]   # (M, Cl, h, w) -> 32, 8
 
+    # Cheap DiT-free score of how PREDICTABLE this latent is (see train.score_latent_predictability).
+    # Printed before Phase 2 so a bad VAE can be judged without waiting for the full DiT run. It is
+    # fast, so it always runs for a freshly trained VAE; a reused checkpoint's latent is unchanged
+    # from its own run, so re-probing would just repeat a known number.
+    if vae_trained:
+        score_latent_predictability(ae, z_all, latent_scale, frame_cache, train_trajs, val_trajs,
+                                    context_len, device)
+
     def latent_loader(trajs, horizon, shuffle, bs):
         ctx_idx, tgt_idx = frame_cache.build_windows(trajs, context_len, horizon)
         return CachedLoader(z_all, ctx_idx, tgt_idx, bs, device, shuffle=shuffle, horizon=horizon)
 
+    # No DiT epochs and no DiT checkpoint = a VAE-only run (optimize the encoder via the latent
+    # probe above, before committing to the ~80-min DiT). Nothing to sample from, so stop here.
+    dit_loaded = bool(dit_checkpoint) and os.path.exists(dit_checkpoint)
+    if dit_checkpoint and not dit_loaded:
+        print(f"[Warn] DiT checkpoint not found: {dit_checkpoint}. Training a new DiT.")
+    if dyn_epochs <= 0 and not dit_loaded:
+        print("DiT epochs = 0 and no DiT checkpoint -> stopping after the VAE stage "
+              "(no DiT training, decoder training or evaluation).")
+        print(f"Training Complete. All files saved in {run_dir}.")
+        return
+
     # ===== Phase 2: Flow Matching DiT (trained on K-frame chunks of next-frame latents) =====
+    # A reused dit.pth must match the architecture fields above AND the VAE's latent space --
+    # pair it with the ae_checkpoint from the same run. Its latent_scale buffer rides in the
+    # checkpoint and overwrites the constructor value on load.
     dit = DiffusionTransformer(latent_ch=latent_ch, context_len=context_len, grid=grid,
                                chunk_len=chunk_len, d_model=dit_d_model, n_layers=dit_n_layers,
-                               n_heads=dit_n_heads, latent_scale=latent_scale).to(device)
-    dit = train_flow_matching(dit, latent_loader(train_trajs, chunk_len, True, dyn_batch_size),
-                              latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
-                              epochs=dyn_epochs, learning_rate=dyn_learning_rate,
-                              weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
-                              ema_decay=dit_ema_decay, context_noise=dit_context_noise, device=device)
+                               n_heads=dit_n_heads, latent_scale=latent_scale,
+                               temporal_tokens=dit_temporal).to(device)
+    if dit_loaded:
+        dit.load_state_dict(torch.load(dit_checkpoint, map_location=device, weights_only=True))
+        print(f"Loaded DiT from {dit_checkpoint} -- skipping Phase 2.")
+    else:
+        dit = train_flow_matching(dit, latent_loader(train_trajs, chunk_len, True, dyn_batch_size),
+                                  latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
+                                  epochs=dyn_epochs, learning_rate=dyn_learning_rate,
+                                  weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
+                                  ema_decay=dit_ema_decay, context_noise=dit_context_noise,
+                                  precision=dit_precision, spike_factor=dit_spike_factor,
+                                  compile_mode=dit_compile, t_dist=dit_t_dist,
+                                  loss_type=dit_loss, huber_c=dit_huber_c, device=device)
     torch.save(dit.state_dict(), os.path.join(run_dir, "dit.pth"))
 
-    # ===== Phase 3: evaluation + rollout GIFs =====
+    # ===== Phase 3: train a fresh FULL-capacity decoder on the DiT's own predictions =====
+    # Runs BEFORE the final eval so Phase 4 scores the deployed decoder. The encoder (and thus the
+    # latent space, cache and dit.pth) is frozen: its weights are copied into a new full-residual
+    # CNNVAE whose decoder is trained from scratch on clean + DiT-predicted latents. This is what
+    # lets a WEAK Phase-1 decoder (vae_dec_res_blocks=0, used only to shape the latent) still end
+    # in a rich renderer. The Phase-1 VAE stays in autoencoder.pth; the final VAE (same encoder,
+    # retrained decoder) is saved as autoencoder_final.pth.
+    dec_loaded = bool(dec_checkpoint) and os.path.exists(dec_checkpoint)
+    if dec_checkpoint and not dec_loaded:
+        print(f"[Warn] Decoder checkpoint not found: {dec_checkpoint}. Training Phase 3 as configured.")
+    if dec_loaded:
+        # Reuse a previously trained final VAE (encoder + retrained rich decoder) for eval, so a
+        # DiT sweep does not pay for Phase 3 every run. Must come from a run with the SAME latent
+        # space (same AE lineage) and match enc/dec res-block settings. Phase 3 proved insensitive
+        # to which DiT produced its training latents, so cross-DiT reuse is fine.
+        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
+                         enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=dec_res_blocks).to(device)
+        ae_full.load_state_dict(torch.load(dec_checkpoint, map_location=device, weights_only=True))
+        ae = ae_full.eval()
+        print(f"Loaded final VAE (retrained decoder) from {dec_checkpoint} -- skipping Phase 3.")
+    elif dec_epochs > 0:
+        # The encoder arch must match Phase 1 (its weights are copied); the decoder capacity is
+        # the Phase-3 knob dec_res_blocks (default 1 = full residual decoder).
+        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
+                         enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=dec_res_blocks).to(device)
+        enc_state = {k: v for k, v in ae.state_dict().items()
+                     if k.startswith(("conv_in", "enc", "to_mu", "to_logvar"))}
+        ae_full.load_state_dict(enc_state, strict=False)
+        ae = retrain_decoder(ae_full, dit, z_all, frame_cache, train_trajs, val_trajs, context_len,
+                             epochs=dec_epochs, learning_rate=dec_learning_rate,
+                             lpips_weight=dec_lpips_weight, lpips_net=dec_lpips_net,
+                             rollout_k=dec_rollout_k,
+                             clean_frac=dec_clean_frac, num_steps=inference_steps,
+                             batch_size=ae_batch_size, grad_clip=dec_grad_clip,
+                             n_train_traj=dec_n_train_traj, device=device)
+    if dec_loaded or dec_epochs > 0:
+        # Saved whether trained or reused (mirrors autoencoder.pth): every run folder carries the
+        # renderer it was evaluated with, so any run can serve as dec_checkpoint later without
+        # chasing the original run it came from.
+        torch.save(ae.state_dict(), os.path.join(run_dir, "autoencoder_final.pth"))
+
+    # ===== Phase 4: evaluation + rollout GIFs =====
     # Cap the rollout to a few hundred windows: each window costs eval_horizon x inference_steps
     # DiT forwards, so the full overlapping test set would be tens of minutes for no extra signal.
     run_evaluation(pixel_loader(test_trajs, eval_horizon, False, ae_batch_size), device, run_dir,
@@ -160,14 +261,37 @@ if __name__ == "__main__":
     parser.add_argument("--ae_learning_rate", type=float, default=5e-4)
     parser.add_argument("--ae_weight_decay", type=float, default=1e-2)
     parser.add_argument("--ae_kl_weight", type=float, default=0.005, help="VAE KL weight (beta). Lower if reconstructions blur / KL collapses; raise if the latent is barely regularized.")
-    parser.add_argument("--ae_lpips_weight", type=float, default=0.0, help="Perceptual (LPIPS-VGG) loss weight on the VAE. 0 = off (pixel+KL only). ~1.0 makes latent L2 track perceptual quality, the key fix for the prediction-blur ceiling. Needs `pip install lpips`.")
+    parser.add_argument("--ae_lpips_weight", type=float, default=0.0, help="Perceptual (LPIPS) loss weight on the VAE. 0 = off (pixel+KL only). ~1.0 makes latent L2 track perceptual quality, the key fix for the prediction-blur ceiling. Needs `pip install lpips`.")
+    parser.add_argument("--ae_lpips_net", type=str, default="alex", choices=["alex", "vgg"], help="LPIPS backbone for Phase 1. alex is cheaper and historically gave the more PREDICTABLE latent (better DiT); vgg pushes recon sharper but traded predictability away in every run so far.")
     parser.add_argument("--ae_grad_clip", type=float, default=10.0, help="Max global grad norm for the VAE (clipped each step). Safety net against the loss spikes a deeper LPIPS backbone (e.g. VGG) can trigger. The sum-reduced recon makes norms large, so this is loose; the logged GradNorm (pre-clip) shows the steady-state -- tighten toward ~2-3x it once observed.")
     parser.add_argument("--latent_grid", type=int, default=8, help="VAE latent spatial size (8 -> 8x8, 16 -> 16x16). 16 makes motion more spatially local for the DiT at 4x token/cache cost. Requires retraining the VAE (8x8 checkpoints are incompatible).")
+    parser.add_argument("--latent_ch", type=int, default=32, help="VAE latent channels per grid cell. More channels raise the reconstruction ceiling and give the DiT a richer per-cell code, at linearly more latent-cache size (does NOT change DiT token count -- that's chunk_len x grid^2). Requires retraining the VAE (checkpoints with a different channel count are incompatible); the DiT adapts automatically from the cache shape.")
     parser.add_argument("--dyn_learning_rate", type=float, default=3e-4)
     parser.add_argument("--dyn_weight_decay", type=float, default=1e-4)
     parser.add_argument("--dit_grad_clip", type=float, default=3.0, help="Max global grad norm for the DiT (clipped each step). Safety net against loss-spike NaN divergence; the logged GradNorm shows whether it's biting. Set ~2-3x above the steady-state norm (which rode 1.2-1.4 late in training, so 1.0 was clipping healthy steps).")
     parser.add_argument("--dit_ema_decay", type=float, default=0.999, help="Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights. Standard diffusion/flow trick, usually worth a few tenths of a dB.")
+    parser.add_argument("--dit_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="DiT training compute precision. bf16/fp16 halve memory traffic (~2x epoch speed at >=8192 token-rows/step) with fp32 master weights; fp16 adds dynamic loss scaling whose inf/nan step-skip doubles as a spike guard (bf16 measured divergent on the temporal layout). fp32 = no autocast, the proven-stable reference. Weights/eval/checkpoints are fp32 in every mode.")
+    parser.add_argument("--dit_spike_factor", type=float, default=4.0, help="Grad-spike guard: drop any DiT step whose pre-clip grad norm exceeds this multiple of the running mean of accepted norms (0 = off). fp32 never spikes, so a spike is a low-precision artifact that clipping can't fix (it caps magnitude, not direction); dropping the step keeps AdamW's moments clean. This is what makes bf16/compiled-fp16 as stable as fp32.")
+    parser.add_argument("--dit_t_dist", choices=["logit_normal", "uniform"], default="logit_normal", help="Flow-matching timestep sampling. logit_normal (SD3) draws t=sigmoid(N(0,1)), concentrating training on the hard middle of the trajectory; uniform is plain U(0,1). Same optimum, different emphasis -- logit_normal is a consistent quality win at no extra cost.")
+    parser.add_argument("--dit_loss", choices=["mse", "huber"], default="mse", help="DiT velocity loss. mse = standard flow-matching L2 (regression to the conditional mean velocity). huber = pseudo-Huber sqrt(err^2+c^2)-c, whose per-element gradient saturates for large errors, so an outlier sample can't produce an unbounded gradient -- curbs precision-induced spikes at the source.")
+    parser.add_argument("--dit_huber_c", type=float, default=1.0, help="Pseudo-Huber transition constant c (only used when --dit_loss huber). Errors >> c behave like L1, << c like L2. Velocity targets have per-element std ~1.4 in the normalized latent space, so c~1.0 balances robustness against fidelity; smaller c = more robust but further from L2's optimum.")
+    parser.add_argument("--dit_fp32", action="store_true", help="Legacy alias for --dit_precision fp32 (takes precedence when set).")
+    parser.add_argument("--dit_temporal", action="store_true", help="Give the DiT time as its OWN token axis: every (frame, cell) of context + chunk becomes a token with factorized time+space positional embeddings, instead of squashing context frames into channels. ~(T+K)/K x more tokens, so proportionally slower per step. dit.pth checkpoints are NOT interchangeable between the two layouts.")
+    parser.add_argument("--dit_compile", choices=["off", "cudagraphs", "default", "reduce-overhead"], default="off", help="torch.compile for the DiT phase. 'cudagraphs' captures fwd/bwd as CUDA graphs with no extra dependencies -- targets the kernel-launch overhead that dominates at batch 64. 'default'/'reduce-overhead' add Inductor codegen, which on Windows needs MSVC plus a triton-windows wheel matching the torch version. Falls back to eager if the backend fails; checkpoints are unaffected either way.")
     parser.add_argument("--dit_context_noise", type=float, default=0.0, help="Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off; in normalized-latent units). Rollout-robustness regularizer against exposure bias; trades a little 1-step accuracy for steadier long horizons. Try ~0.02-0.1.")
+    parser.add_argument("--vae_enc_res_blocks", type=int, default=1, help="Residual blocks per level in the VAE ENCODER. 0 = weak encoder (plain conv+downsample, no bottleneck/attention) -- it cannot write an entangled latent at all; 0/0 with the decoder approximates the pre-residual VAE. A reused ae_checkpoint must match this setting.")
+    parser.add_argument("--vae_dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-1 decoder. 0 = weak decoder (plain conv+upsample, no bottleneck/attention): forces the encoder to write an explicit, predictable latent; pair with dec_epochs>0 so Phase 3 trains a full decoder for rendering. A reused ae_checkpoint must match this setting.")
+    parser.add_argument("--dec_epochs", type=int, default=0, help="Phase 3: epochs to train a FRESH full-capacity decoder from scratch on clean + DiT-predicted latents (0 = off). Encoder + DiT stay frozen so the latent space and dit.pth remain valid; only the rendering changes. Runs after DiT training, before the final eval.")
+    parser.add_argument("--dec_learning_rate", type=float, default=5e-4, help="Phase 3 decoder LR (the decoder trains from scratch, so the full VAE-scale LR is appropriate).")
+    parser.add_argument("--dec_lpips_weight", type=float, default=1.0, help="Phase 3 perceptual (LPIPS) weight, same convention as ae_lpips_weight.")
+    parser.add_argument("--dec_lpips_net", type=str, default="alex", choices=["alex", "vgg"], help="LPIPS backbone for Phase 3. Here the latent is FROZEN, so vgg's sharper gradients cannot hurt predictability -- it only shapes the renderer; worth trying vgg for crisper rollouts.")
+    parser.add_argument("--dec_rollout_k", type=int, default=5, help="Phase 3 max rollout depth K: each batch decodes a DiT latent from a free-running rollout of random depth 1..K, so the decoder sees realistically drifted latents, not just 1-step error.")
+    parser.add_argument("--dec_clean_frac", type=float, default=0.3, help="Phase 3 fraction of batches that decode CLEAN cached encoder latents instead of DiT predictions -- anchors reconstruction quality so the decoder does not overfit to rendering model error.")
+    parser.add_argument("--dec_grad_clip", type=float, default=10.0, help="Max global grad norm for the Phase 3 decoder training (clipped each step).")
+    parser.add_argument("--dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-3 decoder that is trained from scratch (1 = full residual decoder with bottleneck+attention, 0 = weak plain decoder). Lets you match or exceed the Phase-1 decoder capacity for the final renderer.")
+    parser.add_argument("--dec_n_train_traj", type=int, default=1000, help="Phase 3 data cap: trajectories used to build the decoder-training windows (~90+ windows each at rollout_k=5; the full train split is ~4000). Epoch time scales ~linearly; raise it if the decoder underfits or for the final run.")
+    parser.add_argument("--dit_checkpoint", type=str, default="", help="Path to a saved dit.pth to reuse (skips Phase 2, like --ae_checkpoint skips Phase 1). Must match the DiT architecture flags and belong to the same run as the reused VAE -- a DiT only understands the latent space it was trained on.")
+    parser.add_argument("--dec_checkpoint", type=str, default="", help="Path to a saved autoencoder_final.pth to reuse as the eval renderer (skips Phase 3 training). For DiT sweeps on a fixed VAE: keeps pixel metrics comparable without paying for decoder training every run. Must come from a run with the same latent space and match the enc/dec res-block flags.")
     parser.add_argument("--chunk_len", type=int, default=5, help="Chunk prediction: number of future frames (K) the DiT denoises jointly per call")
     parser.add_argument("--dit_d_model", type=int, default=256, help="DiT width (must be divisible by dit_n_heads)")
     parser.add_argument("--dit_n_layers", type=int, default=6, help="DiT depth")
@@ -185,14 +309,26 @@ if __name__ == "__main__":
         context_len=args.context_len, ae_batch_size=args.ae_batch_size, dyn_batch_size=args.dyn_batch_size,
         ae_epochs=args.ae_epochs, dyn_epochs=args.dyn_epochs,
         ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
-        ae_lpips_weight=args.ae_lpips_weight, ae_grad_clip=args.ae_grad_clip,
+        ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
+        ae_grad_clip=args.ae_grad_clip,
         dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay,
         dit_grad_clip=args.dit_grad_clip, dit_ema_decay=args.dit_ema_decay,
+        dit_precision=("fp32" if args.dit_fp32 else args.dit_precision), dit_temporal=args.dit_temporal,
+        dit_spike_factor=args.dit_spike_factor,
+        dit_t_dist=args.dit_t_dist, dit_loss=args.dit_loss, dit_huber_c=args.dit_huber_c,
+        dit_compile=args.dit_compile,
         dit_context_noise=args.dit_context_noise,
+        dec_epochs=args.dec_epochs, dec_learning_rate=args.dec_learning_rate,
+        dec_lpips_weight=args.dec_lpips_weight, dec_lpips_net=args.dec_lpips_net,
+        dec_rollout_k=args.dec_rollout_k,
+        dec_clean_frac=args.dec_clean_frac, dec_grad_clip=args.dec_grad_clip,
+        dec_res_blocks=args.dec_res_blocks, dec_n_train_traj=args.dec_n_train_traj,
+        dec_checkpoint=args.dec_checkpoint,
         eval_horizon=args.eval_horizon, eval_max_batches=args.eval_max_batches,
         eval_best_of_n=args.eval_best_of_n,
-        seed=args.seed, ae_checkpoint=args.ae_checkpoint,
-        latent_grid=args.latent_grid,
+        seed=args.seed, ae_checkpoint=args.ae_checkpoint, dit_checkpoint=args.dit_checkpoint,
+        latent_grid=args.latent_grid, latent_ch=args.latent_ch,
+        vae_enc_res_blocks=args.vae_enc_res_blocks, vae_dec_res_blocks=args.vae_dec_res_blocks,
         chunk_len=args.chunk_len, dit_d_model=args.dit_d_model, dit_n_layers=args.dit_n_layers,
         dit_n_heads=args.dit_n_heads, inference_steps=args.inference_steps
     )

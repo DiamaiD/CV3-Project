@@ -90,10 +90,10 @@ class CNNVAE(nn.Module):
     compresses a 64x64 frame into a SPATIAL latent grid (latent_ch x latent_grid x latent_grid).
 
     Per resolution level the channel width is base_ch * ch_mult[level]:
-      encoder: conv_in -> [ResBlock x num_res_blocks, Downsample] per level
+      encoder: conv_in -> [ResBlock x enc_res_blocks, Downsample] per level
                -> bottleneck (ResBlock, AttnBlock, ResBlock) -> GroupNorm/SiLU -> mu & logvar heads
       decoder: conv_in -> bottleneck (ResBlock, AttnBlock, ResBlock)
-               -> [Upsample, ResBlock x num_res_blocks] per level -> GroupNorm/SiLU -> conv_out -> sigmoid
+               -> [Upsample, ResBlock x dec_res_blocks] per level -> GroupNorm/SiLU -> conv_out -> sigmoid
 
     `latent_grid` sets the compression (number of 2x down/up stages = log2(img_size/latent_grid)):
       * 8  -> 8x8   : more compression, 64 DiT tokens/frame, ~2 GB latent cache.
@@ -103,13 +103,25 @@ class CNNVAE(nn.Module):
     The encoder produces a per-cell Gaussian posterior (mu, logvar); the dynamics pipeline uses the
     deterministic mean mu (see `encode`), normalized to ~unit variance by the latent cache. """
     def __init__(self, latent_ch=32, latent_grid=8, img_size=64,
-                 base_ch=64, ch_mult=(1, 2, 4), num_res_blocks=1, attn=True):
+                 base_ch=64, ch_mult=(1, 2, 4), enc_res_blocks=1, attn=True, dec_res_blocks=None):
         super().__init__()
         n_stages = int(round(math.log2(img_size / latent_grid)))   # 2x down/up steps
         assert n_stages >= 1 and img_size == latent_grid * (2 ** n_stages), \
             f"img_size {img_size} must be latent_grid {latent_grid} x a power of two (>=2)"
         self.latent_ch = latent_ch
         self.latent_grid = latent_grid
+        # Encoder and decoder capacity are decoupled. For either side, 0 = WEAK half: no residual
+        # blocks, no bottleneck/attention -- just plain conv + down/upsample. A weak DECODER cannot
+        # invert an entangled code, which pressures the encoder to write an explicit,
+        # easily-decodable latent (the predictable kind the DiT wants); a weak ENCODER simply
+        # cannot compute an entangled code in the first place (closest to the pre-residual VAE).
+        # dec_res_blocks=None mirrors the encoder (backward compatible with existing checkpoints).
+        # Rendering quality lost to a weak Phase-1 decoder is recovered by training a full-capacity
+        # decoder against the frozen latent after the DiT (Phase 3).
+        if dec_res_blocks is None:
+            dec_res_blocks = enc_res_blocks
+        self.enc_res_blocks = enc_res_blocks
+        self.dec_res_blocks = dec_res_blocks
 
         widths = [base_ch * ch_mult[min(i, len(ch_mult) - 1)] for i in range(n_stages)]
 
@@ -122,13 +134,21 @@ class CNNVAE(nn.Module):
         enc, cur = [], widths[0]
         for i in range(n_stages):
             enc.append(Downsample(cur))                    # res halves first
-            for _ in range(num_res_blocks):
-                enc.append(ResBlock(cur, widths[i])); cur = widths[i]
+            if enc_res_blocks > 0:
+                for _ in range(enc_res_blocks):
+                    enc.append(ResBlock(cur, widths[i])); cur = widths[i]
+            else:
+                # Weak encoder: plain channel-increase conv (after the downsample, so at low res).
+                enc.append(nn.Conv2d(cur, widths[i], 3, padding=1)); cur = widths[i]
+                enc.append(nn.SiLU())
         self.enc = nn.Sequential(*enc)
 
         # Bottleneck at the latent grid: ResBlock - (Attn) - ResBlock, then norm + mu/logvar heads.
-        mid_enc = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
-        self.enc_mid = nn.Sequential(*mid_enc)
+        if enc_res_blocks > 0:
+            mid_enc = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+            self.enc_mid = nn.Sequential(*mid_enc)
+        else:
+            self.enc_mid = nn.Identity()
         self.enc_norm = _group_norm(cur)
         self.to_mu = nn.Conv2d(cur, latent_ch, 3, padding=1)
         self.to_logvar = nn.Conv2d(cur, latent_ch, 3, padding=1)
@@ -140,12 +160,20 @@ class CNNVAE(nn.Module):
         # only 64x64 ops are the final Upsample's conv and conv_out (3 output channels) -- no
         # ResBlock ever runs at full resolution.
         self.dec_in = nn.Conv2d(latent_ch, cur, 3, padding=1)
-        mid_dec = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
-        self.dec_mid = nn.Sequential(*mid_dec)
+        if dec_res_blocks > 0:
+            mid_dec = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+            self.dec_mid = nn.Sequential(*mid_dec)
+        else:
+            self.dec_mid = nn.Identity()
         dec = []
         for i in reversed(range(n_stages)):
-            for _ in range(num_res_blocks):
-                dec.append(ResBlock(cur, widths[i])); cur = widths[i]
+            if dec_res_blocks > 0:
+                for _ in range(dec_res_blocks):
+                    dec.append(ResBlock(cur, widths[i])); cur = widths[i]
+            else:
+                # Plain channel-reduction conv (still BEFORE the upsample so it runs at low res).
+                dec.append(nn.Conv2d(cur, widths[i], 3, padding=1)); cur = widths[i]
+                dec.append(nn.SiLU())
             dec.append(Upsample(cur))                       # upsample after the heavy work
         self.dec = nn.Sequential(*dec)
         self.dec_norm = _group_norm(cur)
@@ -270,15 +298,28 @@ class DiffusionTransformer(nn.Module):
       * time_t          (B,)                           -- continuous flow time in [0, 1]
       * context_latents (B, T, latent_ch, gh, gw)      -- the T context-frame latents
 
-    The context latents are merged into the channel axis (T*latent_ch) and BROADCAST across the K
-    chunk frames, then concatenated with each noisy frame ((T+1)*latent_ch channels, e.g. 5 context
-    + 1 noisy = 6*32 = 192). The (K, gh, gw) grid is flattened into a length K*gh*gw token sequence
-    (one token per (frame, cell)); bidirectional adaLN DiT blocks process it, conditioned on
-    time_t; a final adaLN + linear head unpatchifies back to (B, K, latent_ch, gh, gw). The output
-    is the predicted velocity v = z_1 - z_0 for all K frames, integrated by an Euler ODE solver at
+    Two context layouts, chosen by `temporal_tokens`:
+
+    * False (default, channel-squash): the context latents are merged into the channel axis
+      (T*latent_ch) and BROADCAST across the K chunk frames, then concatenated with each noisy
+      frame ((T+1)*latent_ch channels, e.g. 5 context + 1 noisy = 6*32 = 192). Sequence length is
+      K*gh*gw. Cheap, but the network must disentangle the time axis from a flat channel stack.
+
+    * True (temporal tokens): time is its OWN token axis. Every (frame, cell) -- context frames
+      AND noisy chunk frames alike -- becomes one token of latent_ch channels, giving a
+      (T+K)*gh*gw sequence with joint space-time attention. Position is encoded FACTORIZED
+      (learned time embedding + learned spatial embedding, summed) plus a 2-way segment embedding
+      (context vs noisy), so temporal adjacency is explicit rather than inferred. The head reads
+      only the K noisy-frame tokens. ~ (T+K)/K x the tokens of the squash layout, so proportionally
+      slower per step; checkpoints are NOT interchangeable between the two layouts.
+
+    In both layouts bidirectional adaLN DiT blocks process the sequence, conditioned on time_t; a
+    final adaLN + linear head unpatchifies back to (B, K, latent_ch, gh, gw). The output is the
+    predicted velocity v = z_1 - z_0 for all K frames, integrated by an Euler ODE solver at
     inference. """
     def __init__(self, latent_ch=32, context_len=5, grid=8, chunk_len=5,
-                 d_model=256, n_layers=6, n_heads=8, dropout=0.0, latent_scale=1.0):
+                 d_model=256, n_layers=6, n_heads=8, dropout=0.0, latent_scale=1.0,
+                 temporal_tokens=False):
         super().__init__()
         self.latent_ch = latent_ch
         self.context_len = context_len
@@ -289,11 +330,26 @@ class DiffusionTransformer(nn.Module):
         # decode -> *latent_scale at the VAE boundary. Stored as a buffer so it rides in the
         # checkpoint. See train.build_latent_cache.
         self.register_buffer("latent_scale", torch.as_tensor(latent_scale, dtype=torch.float32))
-        self.seq_len = chunk_len * grid * grid           # K * gh * gw tokens
-        self.in_ch = (context_len + 1) * latent_ch       # context frames (broadcast) + this noisy frame
+        self.temporal_tokens = temporal_tokens
 
-        self.patch = nn.Linear(self.in_ch, d_model)      # patch size 1: one token per (frame, cell)
-        self.pos_emb = nn.Parameter(torch.zeros(1, self.seq_len, d_model))
+        if temporal_tokens:
+            # Time as its own token axis: one token per (frame, cell) across context AND chunk.
+            self.seq_len = (context_len + chunk_len) * grid * grid
+            self.patch = nn.Linear(latent_ch, d_model)   # each token embeds ONE cell's latent
+            # Factorized 3D position: pos(frame, cell) = time_pos[frame] + space_pos[cell]. The
+            # broadcast shapes (1,T+K,1,D) + (1,1,g^2,D) sum into the (B,T+K,g^2,D) token grid.
+            self.time_pos = nn.Parameter(torch.zeros(1, context_len + chunk_len, 1, d_model))
+            self.space_pos = nn.Parameter(torch.zeros(1, 1, grid * grid, d_model))
+            # Marks a token as clean context vs noisy chunk (same role as BERT segment embeddings).
+            self.segment = nn.Parameter(torch.zeros(2, d_model))
+            nn.init.normal_(self.time_pos, std=0.02)
+            nn.init.normal_(self.space_pos, std=0.02)
+            nn.init.normal_(self.segment, std=0.02)
+        else:
+            self.seq_len = chunk_len * grid * grid           # K * gh * gw tokens
+            self.in_ch = (context_len + 1) * latent_ch       # context frames (broadcast) + this noisy frame
+            self.patch = nn.Linear(self.in_ch, d_model)      # patch size 1: one token per (frame, cell)
+            self.pos_emb = nn.Parameter(torch.zeros(1, self.seq_len, d_model))
 
         # Timestep embedding -> conditioning vector shared by every block's adaLN.
         self.t_embed = SinusoidalPositionEmbedding(d_model)
@@ -311,7 +367,8 @@ class DiffusionTransformer(nn.Module):
         self.ada_out = nn.Sequential(nn.SiLU(), nn.Linear(d_model, 2 * d_model))
         self.head = nn.Linear(d_model, latent_ch)
 
-        nn.init.normal_(self.pos_emb, std=0.02)
+        if not temporal_tokens:
+            nn.init.normal_(self.pos_emb, std=0.02)
         nn.init.zeros_(self.ada_out[-1].weight)
         nn.init.zeros_(self.ada_out[-1].bias)
         nn.init.zeros_(self.head.weight)
@@ -322,14 +379,25 @@ class DiffusionTransformer(nn.Module):
         B, K = x_noisy.shape[0], x_noisy.shape[1]
         gh = gw = self.grid
 
-        # Context frames -> channels, then broadcast across the K chunk frames.
-        ctx = context_latents.reshape(B, self.context_len * self.latent_ch, gh, gw)   # (B, T*Cl, gh, gw)
-        ctx = ctx.unsqueeze(1).expand(-1, K, -1, -1, -1)                              # (B, K, T*Cl, gh, gw)
-        x = torch.cat([ctx, x_noisy], dim=2)                                          # (B, K, (T+1)*Cl, gh, gw)
+        if self.temporal_tokens:
+            # Time stays an explicit axis: (B, T+K, g^2, Cl) -- one token per (frame, cell).
+            T = self.context_len
+            g2 = gh * gw
+            z = torch.cat([context_latents, x_noisy], dim=1)                          # (B, T+K, Cl, gh, gw)
+            z = z.permute(0, 1, 3, 4, 2).reshape(B, T + K, g2, self.latent_ch)
+            x = self.patch(z) + self.time_pos + self.space_pos                        # factorized position
+            seg = torch.cat([self.segment[0].expand(T, g2, -1),
+                             self.segment[1].expand(K, g2, -1)], dim=0)               # (T+K, g2, D)
+            x = (x + seg).reshape(B, (T + K) * g2, -1)                                # (B, L, d_model)
+        else:
+            # Context frames -> channels, then broadcast across the K chunk frames.
+            ctx = context_latents.reshape(B, self.context_len * self.latent_ch, gh, gw)   # (B, T*Cl, gh, gw)
+            ctx = ctx.unsqueeze(1).expand(-1, K, -1, -1, -1)                              # (B, K, T*Cl, gh, gw)
+            x = torch.cat([ctx, x_noisy], dim=2)                                          # (B, K, (T+1)*Cl, gh, gw)
 
-        # Flatten (K, gh, gw) into a sequence of K*gh*gw tokens, channels last.
-        x = x.permute(0, 1, 3, 4, 2).reshape(B, K * gh * gw, self.in_ch)              # (B, L, in_ch)
-        x = self.patch(x) + self.pos_emb[:, :x.shape[1]]                              # (B, L, d_model)
+            # Flatten (K, gh, gw) into a sequence of K*gh*gw tokens, channels last.
+            x = x.permute(0, 1, 3, 4, 2).reshape(B, K * gh * gw, self.in_ch)              # (B, L, in_ch)
+            x = self.patch(x) + self.pos_emb[:, :x.shape[1]]                              # (B, L, d_model)
 
         cond = self.t_mlp(self.t_embed(time_t))          # (B, d_model)
         for block in self.blocks:
@@ -337,7 +405,9 @@ class DiffusionTransformer(nn.Module):
 
         shift, scale = self.ada_out(cond).chunk(2, dim=1)
         x = _modulate(self.norm_out(x), shift, scale)
-        x = self.head(x)                                 # (B, L, latent_ch)
+        if self.temporal_tokens:
+            x = x[:, -K * gh * gw:]                      # the head reads only the noisy-chunk tokens
+        x = self.head(x)                                 # (B, K*gh*gw, latent_ch)
 
         # Unpatchify: (B, K*gh*gw, latent_ch) -> (B, K, latent_ch, gh, gw).
         return x.reshape(B, K, gh, gw, self.latent_ch).permute(0, 1, 4, 2, 3)
