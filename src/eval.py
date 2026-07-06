@@ -61,7 +61,7 @@ def _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps, use_amp=F
 
 
 def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images=True,
-                   max_batches=None, best_of_n=1, compile_mode="off"):
+                   max_batches=None, best_of_n=1, n_pngs=1, compile_mode="off"):
     model_type = "FlowMatch"
     print(f"\n--- Phase 4: Final Test Set Evaluation ({model_type}) ---")
 
@@ -77,7 +77,9 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
             dit_run = dit
             print(f"[Eval] torch.compile unavailable ({e}) -- running eager.")
 
-    vis_ctx = vis_target = vis_pred = None
+    vis_ctx_l, vis_tgt_l, vis_pred_l = [], [], []
+    n_vis = n_pngs * 8
+    n_vis_collected = 0
     bestN = best_of_n > 1
 
     metric_keys = ["model_pix_mse", "persist_pix_mse", "model_lat_mse", "persist_lat_mse"]
@@ -138,8 +140,12 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
                     stats["bestN_pix_mse"][k] += best_pix[:, k].sum().item()
                     stats["bestN_lat_mse"][k] += best_lat[:, k].sum().item()
 
-            if i == 0 and save_images:
-                vis_ctx, vis_target, vis_pred = last_frame, future_frames[:, 0], step0_first
+            if save_images and n_vis_collected < n_vis:
+                take = min(B, n_vis - n_vis_collected)
+                vis_ctx_l.append(last_frame[:take])
+                vis_tgt_l.append(future_frames[:take, 0])
+                vis_pred_l.append(step0_first[:take])
+                n_vis_collected += take
 
             total += B
             if (i + 1) % 5 == 0 or (i + 1) == nb_eval:
@@ -251,45 +257,56 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
         json.dump(results, f, indent=2)
     print(f"Saved {model_type} evaluation results to: {results_path}")
 
-    if save_images and vis_pred is not None:
-        num_samples = min(8, vis_target.size(0))
-        vis_mse = ((vis_pred[:num_samples] - vis_target[:num_samples]) ** 2).mean().item()
-        vis_psnr = _psnr(vis_mse)
-        grid_imgs = []
-        for j in range(num_samples):
-            ctx_rgb = vis_ctx[j].cpu()
-            target_rgb = vis_target[j].cpu()
-            pred_rgb = vis_pred[j].cpu()
+    if save_images and n_vis_collected > 0:
+        vis_ctx = torch.cat(vis_ctx_l)
+        vis_target = torch.cat(vis_tgt_l)
+        vis_pred = torch.cat(vis_pred_l)
+        num_samples = min(n_vis, vis_target.size(0))
+        per_page = 8
+        n_pages = (num_samples + per_page - 1) // per_page
 
-            error_rgb = torch.clamp(torch.abs(target_rgb - pred_rgb) * 2.0, 0, 1)
-            grid_imgs.extend([ctx_rgb, target_rgb, pred_rgb, error_rgb])
+        for page in range(n_pages):
+            lo, hi = page * per_page, min((page + 1) * per_page, num_samples)
+            vis_mse = ((vis_pred[lo:hi] - vis_target[lo:hi]) ** 2).mean().item()
+            vis_psnr = _psnr(vis_mse)
+            grid_imgs = []
+            for j in range(lo, hi):
+                ctx_rgb = vis_ctx[j].cpu()
+                target_rgb = vis_target[j].cpu()
+                pred_rgb = vis_pred[j].cpu()
 
-        img_grid = torchvision.utils.make_grid(grid_imgs, nrow=4, pad_value=0.5)
+                error_rgb = torch.clamp(torch.abs(target_rgb - pred_rgb) * 2.0, 0, 1)
+                grid_imgs.extend([ctx_rgb, target_rgb, pred_rgb, error_rgb])
 
-        img_np = img_grid.permute(1, 2, 0).cpu().numpy() * 255
-        img_np = np.clip(img_np, 0, 255).astype(np.uint8)
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            img_grid = torchvision.utils.make_grid(grid_imgs, nrow=4, pad_value=0.5)
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        margin = 10
-        header_lines = [
-            (f"Model: {model_type}  |  1-step PSNR {vis_psnr:.2f} dB", 25, 0.6, 2, (0, 0, 0)),
-            ("Cols: [Frame t-1] | [Truth t] | [Pred t] | [Abs. Error]", 50, 0.5, 1, (0, 0, 0)),
-            ("Abs. Error: Black = Perfect Match | Colors = Deviation in predicted physics/materials", 70, 0.45, 1, (0, 0, 200)),
-        ]
+            img_np = img_grid.permute(1, 2, 0).cpu().numpy() * 255
+            img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-        text_w = max(cv2.getTextSize(t, font, s, th)[0][0] for t, _, s, th, _ in header_lines)
-        right_pad = max(0, (text_w + 2 * margin) - img_bgr.shape[1])
-        header_height = 80
-        img_padded = cv2.copyMakeBorder(img_bgr, header_height, 0, 0, right_pad, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            margin = 10
+            title = f"Model: {model_type}  |  1-step PSNR {vis_psnr:.2f} dB"
+            if n_pages > 1:
+                title += f"  |  Page {page + 1}/{n_pages} (samples {lo + 1}-{hi})"
+            header_lines = [
+                (title, 25, 0.6, 2, (0, 0, 0)),
+                ("Cols: [Frame t-1] | [Truth t] | [Pred t] | [Abs. Error]", 50, 0.5, 1, (0, 0, 0)),
+                ("Abs. Error: Black = Perfect Match | Colors = Deviation in predicted physics/materials", 70, 0.45, 1, (0, 0, 200)),
+            ]
 
-        for text, y, scale, thickness, color in header_lines:
-            cv2.putText(img_padded, text, (margin, y), font, scale, color, thickness)
+            text_w = max(cv2.getTextSize(t, font, s, th)[0][0] for t, _, s, th, _ in header_lines)
+            right_pad = max(0, (text_w + 2 * margin) - img_bgr.shape[1])
+            header_height = 80
+            img_padded = cv2.copyMakeBorder(img_bgr, header_height, 0, 0, right_pad, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
-        save_path = os.path.join(run_dir, f"eval_predictions_{model_type}.png")
-        cv2.imwrite(save_path, img_padded)
+            for text, y, scale, thickness, color in header_lines:
+                cv2.putText(img_padded, text, (margin, y), font, scale, color, thickness)
 
-        print(f"Saved {model_type} evaluation image grid to: {save_path}")
+            suffix = f"_{page + 1}" if n_pages > 1 else ""
+            save_path = os.path.join(run_dir, f"eval_predictions_{model_type}{suffix}.png")
+            cv2.imwrite(save_path, img_padded)
+            print(f"Saved {model_type} evaluation image grid to: {save_path}")
 
 
 def _save_reconstruction_grid(frames, recon, run_dir, filename, title):

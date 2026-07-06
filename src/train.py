@@ -150,7 +150,7 @@ def build_lpips(device, net="alex"):
 
 def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
                       weight_decay=1e-4, kl_weight=1.0, lpips_weight=0.0, lpips_net="alex",
-                      grad_clip=10.0, compile_mode="off", device="cuda"):
+                      grad_clip=10.0, precision="bf16", compile_mode="off", device="cuda"):
     print(f"--- Phase 1: Training Autoencoder (VAE) ---")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -166,8 +166,15 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         backbone = getattr(perceptual, "pnet_type", "?")
         print(f"[VAE] Perceptual loss ON: LPIPS-{backbone}, weight {lpips_weight}.")
 
+    on_cuda = str(device).startswith("cuda")
+    amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(precision)
+    use_amp = amp_dtype is not None and on_cuda
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and precision == "fp16"))
+    if use_amp:
+        print(f"[VAE] Mixed precision ON: {precision} autocast.")
+
     ae_fwd = ae
-    if compile_mode == "on" and str(device).startswith("cuda"):
+    if compile_mode == "on" and on_cuda:
         try:
             from torch import _dynamo
             _dynamo.config.suppress_errors = True
@@ -190,17 +197,20 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             x = ctx_frames.view(-1, C, H, W).to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            recon, mu, logvar = ae_fwd(x)
-            recon_loss = F.mse_loss(recon, x, reduction="sum") / x.shape[0]
-            kl = _vae_kl(mu, logvar)
+            with torch.autocast(device_type="cuda", dtype=amp_dtype if use_amp else torch.bfloat16, enabled=use_amp):
+                recon, mu, logvar = ae_fwd(x)
+                perc = perceptual(recon, x, normalize=True).mean() if perceptual is not None else None
+            recon_loss = F.mse_loss(recon.float(), x, reduction="sum") / x.shape[0]
+            kl = _vae_kl(mu.float(), logvar.float())
             loss = recon_loss + kl_weight * kl
-            if perceptual is not None:
-                perc = perceptual(recon, x, normalize=True).mean()
-                loss = loss + lpips_weight * perc
-                tr_perc += perc.detach()
-            loss.backward()
+            if perc is not None:
+                loss = loss + lpips_weight * perc.float()
+                tr_perc += perc.detach().float()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             gnorm = torch.nn.utils.clip_grad_norm_(ae.parameters(), max_norm=grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             tr_recon += recon_loss.detach()
             tr_kl += kl.detach()
@@ -214,11 +224,13 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             for ctx_frames, target_frame in val_loader:
                 B, T, C, H, W = ctx_frames.shape
                 x = ctx_frames.view(-1, C, H, W).to(device)
-                recon, mu, logvar = ae_fwd(x)
-                val_mse += F.mse_loss(recon, x)
-                val_kl += _vae_kl(mu, logvar)
-                if perceptual is not None:
-                    val_perc += perceptual(recon, x, normalize=True).mean()
+                with torch.autocast(device_type="cuda", dtype=amp_dtype if use_amp else torch.bfloat16, enabled=use_amp):
+                    recon, mu, logvar = ae_fwd(x)
+                    vperc = perceptual(recon, x, normalize=True).mean() if perceptual is not None else None
+                val_mse += F.mse_loss(recon.float(), x)
+                val_kl += _vae_kl(mu.float(), logvar.float())
+                if vperc is not None:
+                    val_perc += vperc.float()
 
         nb_tr, nb_val = len(train_loader), len(val_loader)
         val_mse_mean = val_mse.item() / nb_val
@@ -393,8 +405,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
 def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context_len,
                     epochs=3, learning_rate=5e-4, weight_decay=0.0, lpips_weight=1.0,
                     lpips_net="alex", rollout_k=5, clean_frac=0.3, num_steps=10, batch_size=64,
-                    grad_clip=10.0, n_train_traj=1000, n_val_traj=100, compile_mode="off",
-                    device="cuda"):
+                    grad_clip=10.0, n_train_traj=1000, n_val_traj=100, precision="bf16",
+                    compile_mode="off", device="cuda"):
     from src.eval import flow_sample
     ctx_tr, tgt_tr = frame_cache.build_windows(train_trajs[:n_train_traj], context_len, rollout_k)
     ctx_va, tgt_va = frame_cache.build_windows(val_trajs[:n_val_traj], context_len, rollout_k)
@@ -425,9 +437,14 @@ def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context
         backbone = getattr(perceptual, "pnet_type", "?")
         print(f"[DecTrain] Perceptual loss ON: LPIPS-{backbone}, weight {lpips_weight}.")
 
-    use_amp = str(device).startswith("cuda")
+    on_cuda = str(device).startswith("cuda")
+    amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(precision)
+    use_amp = amp_dtype is not None and on_cuda
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and precision == "fp16"))
+    if use_amp:
+        print(f"[DecTrain] Mixed precision ON: {precision} autocast.")
     dit_run, decode_run = dit, ae.decode
-    if compile_mode == "on" and use_amp:
+    if compile_mode == "on" and on_cuda:
         try:
             from torch import _dynamo
             _dynamo.config.suppress_errors = True
@@ -446,7 +463,7 @@ def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context
         return z_all[idx].float().to(device)
 
     def _autocast():
-        return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp)
+        return torch.autocast(device_type="cuda", dtype=amp_dtype if use_amp else torch.bfloat16, enabled=use_amp)
 
     @torch.no_grad()
     def _rollout_cache(ctx_idx):
@@ -475,6 +492,7 @@ def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context
     roll_va = _rollout_cache(ctx_va)
     print(f"[DecTrain] Rollout cache ready in {time.time() - t0:.1f}s "
           f"({(roll_tr.numel() + roll_va.numel()) * 2 / 1e9:.2f} GB); DiT not called again.")
+    torch.set_grad_enabled(True)
 
     @torch.no_grad()
     def _val_metrics():
@@ -515,15 +533,17 @@ def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context
             target = _frames_at(tg[:, j - 1])
 
             optimizer.zero_grad(set_to_none=True)
-            with _autocast():
+            with torch.enable_grad(), _autocast():
                 recon = decode_run(z_pred * scale)
                 perc = perceptual(recon, target, normalize=True).mean() if perceptual is not None else None
-            loss = F.mse_loss(recon.float(), target, reduction="sum") / target.shape[0]
-            if perc is not None:
-                loss = loss + lpips_weight * perc.float()
-            loss.backward()
+                loss = F.mse_loss(recon.float(), target, reduction="sum") / target.shape[0]
+                if perc is not None:
+                    loss = loss + lpips_weight * perc.float()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             gnorm = torch.nn.utils.clip_grad_norm_(dec_params, max_norm=grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             tr_loss += loss.detach()
             tr_gnorm += gnorm.detach()

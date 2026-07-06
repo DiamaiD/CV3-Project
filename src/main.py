@@ -27,15 +27,16 @@ def run_training_pipeline(*args, **kwargs):
 def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
-                          ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0,
+                          ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
                           dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16", dit_temporal=False,
                           compile_mode="off", dit_spike_factor=4.0,
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
                           dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
                           dec_rollout_k=5, dec_clean_frac=0.3, dec_grad_clip=10.0, dec_res_blocks=1,
-                          dec_n_train_traj=1000, dec_checkpoint="",
+                          dec_n_train_traj=1000, dec_checkpoint="", dec_precision="bf16",
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
+                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40,
                           seed=None, ae_checkpoint="", dit_checkpoint="", latent_grid=8, latent_ch=32,
                           vae_enc_res_blocks=1, vae_dec_res_blocks=1,
                           chunk_len=5, dit_d_model=256, dit_n_layers=6, dit_n_heads=8, inference_steps=10):
@@ -105,7 +106,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
                                weight_decay=ae_weight_decay, kl_weight=ae_kl_weight,
                                lpips_weight=ae_lpips_weight, lpips_net=ae_lpips_net,
-                               grad_clip=ae_grad_clip, compile_mode=compile_mode, device=device)
+                               grad_clip=ae_grad_clip, precision=ae_precision, compile_mode=compile_mode, device=device)
 
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
     torch.save(ae.state_dict(), os.path.join(run_dir, "autoencoder.pth"))
@@ -169,13 +170,13 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                              rollout_k=dec_rollout_k,
                              clean_frac=dec_clean_frac, num_steps=inference_steps,
                              batch_size=ae_batch_size, grad_clip=dec_grad_clip,
-                             n_train_traj=dec_n_train_traj, compile_mode=compile_mode, device=device)
+                             n_train_traj=dec_n_train_traj, precision=dec_precision, compile_mode=compile_mode, device=device)
     if dec_loaded or dec_epochs > 0:
         torch.save(ae.state_dict(), os.path.join(run_dir, "autoencoder_final.pth"))
 
     run_evaluation(pixel_loader(test_trajs, eval_horizon, False, ae_batch_size), device, run_dir,
                    ae=ae, dit=dit, num_steps=inference_steps, max_batches=eval_max_batches,
-                   best_of_n=eval_best_of_n, compile_mode=compile_mode)
+                   best_of_n=eval_best_of_n, n_pngs=eval_n_pngs, compile_mode=compile_mode)
 
     ae.eval(); dit.eval()
 
@@ -188,8 +189,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         frames = ae.decode((z_chunk * dit.latent_scale).reshape(K, *z_chunk.shape[2:]))
         return frames.unsqueeze(0)
 
-    for traj in test_trajs[:2]:
-        save_rollout_video(flow_predict_chunk, traj, device, run_dir, context_len=context_len)
+    for traj in test_trajs[:eval_n_gifs]:
+        save_rollout_video(flow_predict_chunk, traj, device, run_dir, context_len=context_len,
+                           n_steps=eval_gif_len)
 
     print(f"Training Complete. All files saved in {run_dir}.")
 
@@ -223,6 +225,8 @@ if __name__ == "__main__":
     parser.add_argument("--dit_fp32", action="store_true", help="Legacy alias for --dit_precision fp32 (takes precedence when set).")
     parser.add_argument("--dit_temporal", action="store_true", help="Give the DiT time as its OWN token axis: every (frame, cell) of context + chunk becomes a token with factorized time+space positional embeddings, instead of squashing context frames into channels. ~(T+K)/K x more tokens, so proportionally slower per step. dit.pth checkpoints are NOT interchangeable between the two layouts.")
     parser.add_argument("--compile", choices=["off", "on"], default="off", help="torch.compile (Inductor) for all training phases. Falls back to eager if compilation fails; checkpoints are unaffected either way.")
+    parser.add_argument("--ae_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 1 (VAE) compute precision (autocast; fp16 adds gradient scaling).")
+    parser.add_argument("--dec_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 3 (decoder) compute precision (autocast; fp16 adds gradient scaling).")
     parser.add_argument("--dit_context_noise", type=float, default=0.0, help="Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off; in normalized-latent units). Rollout-robustness regularizer against exposure bias; trades a little 1-step accuracy for steadier long horizons. Try ~0.02-0.1.")
     parser.add_argument("--vae_enc_res_blocks", type=int, default=1, help="Residual blocks per level in the VAE ENCODER. 0 = weak encoder (plain conv+downsample, no bottleneck/attention) -- it cannot write an entangled latent at all; 0/0 with the decoder approximates the pre-residual VAE. A reused ae_checkpoint must match this setting.")
     parser.add_argument("--vae_dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-1 decoder. 0 = weak decoder (plain conv+upsample, no bottleneck/attention): forces the encoder to write an explicit, predictable latent; pair with dec_epochs>0 so Phase 3 trains a full decoder for rendering. A reused ae_checkpoint must match this setting.")
@@ -245,6 +249,9 @@ if __name__ == "__main__":
     parser.add_argument("--eval_horizon", type=int, default=50, help="Rollout length used at eval time to report error growth vs horizon")
     parser.add_argument("--eval_max_batches", type=int, default=24, help="Cap on test batches rolled out at eval (each window costs eval_horizon x inference_steps DiT forwards)")
     parser.add_argument("--eval_best_of_n", type=int, default=1, help="Sample N independent rollouts per window and also report the best (per trajectory). Reveals if single-sample MSE punishes valid alternative futures. Multiplies eval cost by N.")
+    parser.add_argument("--eval_n_pngs", type=int, default=1, help="Number of eval prediction grid PNGs (8 scenarios each, collected across test batches).")
+    parser.add_argument("--eval_n_gifs", type=int, default=2, help="Number of test trajectories rendered as rollout GIFs.")
+    parser.add_argument("--eval_gif_len", type=int, default=40, help="Rollout steps per GIF; clamped to trajectory length minus context_len.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible runs")
     parser.add_argument("--ae_checkpoint", type=str, default="", help="Path to a saved autoencoder.pth to reuse (skips Phase 1)")
     args = parser.parse_args()
@@ -262,6 +269,7 @@ if __name__ == "__main__":
         dit_spike_factor=args.dit_spike_factor,
         dit_t_dist=args.dit_t_dist, dit_loss=args.dit_loss, dit_huber_c=args.dit_huber_c,
         compile_mode=args.compile,
+        ae_precision=args.ae_precision, dec_precision=args.dec_precision,
         dit_context_noise=args.dit_context_noise,
         dec_epochs=args.dec_epochs, dec_learning_rate=args.dec_learning_rate,
         dec_lpips_weight=args.dec_lpips_weight, dec_lpips_net=args.dec_lpips_net,
@@ -271,6 +279,7 @@ if __name__ == "__main__":
         dec_checkpoint=args.dec_checkpoint,
         eval_horizon=args.eval_horizon, eval_max_batches=args.eval_max_batches,
         eval_best_of_n=args.eval_best_of_n,
+        eval_n_pngs=args.eval_n_pngs, eval_n_gifs=args.eval_n_gifs, eval_gif_len=args.eval_gif_len,
         seed=args.seed, ae_checkpoint=args.ae_checkpoint, dit_checkpoint=args.dit_checkpoint,
         latent_grid=args.latent_grid, latent_ch=args.latent_ch,
         vae_enc_res_blocks=args.vae_enc_res_blocks, vae_dec_res_blocks=args.vae_dec_res_blocks,

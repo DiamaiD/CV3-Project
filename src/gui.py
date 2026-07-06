@@ -133,6 +133,11 @@ class TrainingGUI(ctk.CTk):
         self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
         self.ae_browse_button.grid(row=4, column=7, padx=10, pady=10)
 
+        self.ae_precision_label = ctk.CTkLabel(self.ae_frame, text="Precision:", font=self.bold_font)
+        self.ae_precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
+        self.ae_precision_menu = ctk.CTkOptionMenu(self.ae_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
+        self.ae_precision_menu.grid(row=5, column=1, padx=10, pady=10, sticky="w")
+
         self.dyn_frame = ctk.CTkFrame(dyn_tab)
         self.dyn_frame.pack(pady=10, padx=10, fill="x")
 
@@ -280,6 +285,11 @@ class TrainingGUI(ctk.CTk):
         self.dec_lpips_net_menu = ctk.CTkOptionMenu(self.dec_frame, values=["alex", "vgg"], font=self.huge_font, width=100)
         self.dec_lpips_net_menu.grid(row=3, column=1, padx=10, pady=10, sticky="w")
 
+        self.dec_precision_label = ctk.CTkLabel(self.dec_frame, text="Precision:", font=self.bold_font)
+        self.dec_precision_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
+        self.dec_precision_menu = ctk.CTkOptionMenu(self.dec_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
+        self.dec_precision_menu.grid(row=3, column=3, padx=10, pady=10, sticky="w")
+
         self.dec_ckpt_label = ctk.CTkLabel(self.dec_frame, text="Reuse Dec:", font=self.bold_font)
         self.dec_ckpt_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
         self.dec_ckpt_entry = ctk.CTkEntry(self.dec_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder_final.pth (blank = train Phase 3)")
@@ -312,6 +322,21 @@ class TrainingGUI(ctk.CTk):
         self.best_of_n_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
         self.best_of_n_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
         self.best_of_n_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+
+        self.eval_png_label = ctk.CTkLabel(self.eval_frame, text="Eval PNGs:", font=self.bold_font)
+        self.eval_png_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.eval_png_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.eval_png_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+
+        self.eval_gifs_label = ctk.CTkLabel(self.eval_frame, text="Rollout GIFs:", font=self.bold_font)
+        self.eval_gifs_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
+        self.eval_gifs_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.eval_gifs_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
+
+        self.eval_gif_len_label = ctk.CTkLabel(self.eval_frame, text="GIF Length:", font=self.bold_font)
+        self.eval_gif_len_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
+        self.eval_gif_len_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
+        self.eval_gif_len_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
 
         self.actions_frame = ctk.CTkFrame(self)
         self.actions_frame.pack(pady=(0, 5), padx=20, fill="x")
@@ -506,12 +531,17 @@ class TrainingGUI(ctk.CTk):
                 self.eval_batches_entry.delete(0, "end"); self.eval_batches_entry.insert(0, str(c.get("eval_max_batches", 24)))
                 self.chunk_len_entry.delete(0, "end"); self.chunk_len_entry.insert(0, str(c.get("chunk_len", 5)))
                 self.best_of_n_entry.delete(0, "end"); self.best_of_n_entry.insert(0, str(c.get("eval_best_of_n", 1)))
+                self.eval_png_entry.delete(0, "end"); self.eval_png_entry.insert(0, str(c.get("eval_n_pngs", 1)))
+                self.eval_gifs_entry.delete(0, "end"); self.eval_gifs_entry.insert(0, str(c.get("eval_n_gifs", 2)))
+                self.eval_gif_len_entry.delete(0, "end"); self.eval_gif_len_entry.insert(0, str(c.get("eval_gif_len", 40)))
                 self.ema_decay_entry.delete(0, "end"); self.ema_decay_entry.insert(0, str(c.get("dit_ema_decay", 0.999)))
                 self.ctx_noise_entry.delete(0, "end"); self.ctx_noise_entry.insert(0, str(c.get("dit_context_noise", 0.0)))
                 self.temporal_check.select() if c.get("dit_temporal", False) else self.temporal_check.deselect()
                 _cm = str(c.get("compile", c.get("dit_compile", "off")))
                 self.compile_menu.set("off" if _cm in ("off", "") else "on")
                 self.precision_menu.set(c.get("dit_precision", "bf16"))
+                self.ae_precision_menu.set(c.get("ae_precision", "bf16"))
+                self.dec_precision_menu.set(c.get("dec_precision", "bf16"))
                 self.spike_entry.delete(0, "end"); self.spike_entry.insert(0, str(c.get("dit_spike_factor", 4.0)))
                 self.tdist_menu.set(c.get("dit_t_dist", "logit_normal"))
                 self.loss_menu.set(c.get("dit_loss", "mse"))
@@ -567,11 +597,16 @@ class TrainingGUI(ctk.CTk):
             self.eval_batches_entry.insert(0, "24")
             self.chunk_len_entry.insert(0, "5")
             self.best_of_n_entry.insert(0, "1")
+            self.eval_png_entry.insert(0, "1")
+            self.eval_gifs_entry.insert(0, "2")
+            self.eval_gif_len_entry.insert(0, "40")
             self.ema_decay_entry.insert(0, "0.999")
             self.ctx_noise_entry.insert(0, "0.0")
             self.temporal_check.deselect()
             self.compile_menu.set("off")
             self.precision_menu.set("bf16")
+            self.ae_precision_menu.set("bf16")
+            self.dec_precision_menu.set("bf16")
             self.spike_entry.insert(0, "4.0")
             self.tdist_menu.set("logit_normal")
             self.loss_menu.set("mse")
@@ -623,11 +658,16 @@ class TrainingGUI(ctk.CTk):
                 "eval_max_batches": int(self.eval_batches_entry.get()),
                 "chunk_len": int(self.chunk_len_entry.get()),
                 "eval_best_of_n": int(self.best_of_n_entry.get()),
+                "eval_n_pngs": int(self.eval_png_entry.get()),
+                "eval_n_gifs": int(self.eval_gifs_entry.get()),
+                "eval_gif_len": int(self.eval_gif_len_entry.get()),
                 "dit_ema_decay": float(self.ema_decay_entry.get()),
                 "dit_context_noise": float(self.ctx_noise_entry.get()),
                 "dit_temporal": bool(self.temporal_check.get()),
                 "compile": self.compile_menu.get(),
                 "dit_precision": self.precision_menu.get(),
+                "ae_precision": self.ae_precision_menu.get(),
+                "dec_precision": self.dec_precision_menu.get(),
                 "dit_spike_factor": float(self.spike_entry.get()),
                 "dit_t_dist": self.tdist_menu.get(),
                 "dit_loss": self.loss_menu.get(),
@@ -698,11 +738,15 @@ class TrainingGUI(ctk.CTk):
             dec_n_train_traj=c.get('dec_n_train_traj', 1000),
             dec_checkpoint=c.get('dec_checkpoint', ""),
             chunk_len=c.get('chunk_len', 5), eval_best_of_n=c.get('eval_best_of_n', 1),
+            eval_n_pngs=c.get('eval_n_pngs', 1), eval_n_gifs=c.get('eval_n_gifs', 2),
+            eval_gif_len=c.get('eval_gif_len', 40),
             dit_ema_decay=c.get('dit_ema_decay', 0.999),
             dit_context_noise=c.get('dit_context_noise', 0.0),
             dit_temporal=c.get('dit_temporal', False),
             compile_mode=c.get('compile', "off"),
             dit_precision=c.get('dit_precision', "bf16"),
+            ae_precision=c.get('ae_precision', "bf16"),
+            dec_precision=c.get('dec_precision', "bf16"),
             dit_spike_factor=c.get('dit_spike_factor', 4.0),
             dit_t_dist=c.get('dit_t_dist', "logit_normal"),
             dit_loss=c.get('dit_loss', "mse"), dit_huber_c=c.get('dit_huber_c', 1.0),
