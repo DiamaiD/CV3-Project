@@ -7,6 +7,10 @@ from tkinter import filedialog
 from src.main import run_training_pipeline
 from environments.env_bouncing import generate_bouncing_data
 
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
 CONFIG_FILE = "configs/model_config.json"
 
 class TrainingGUI(ctk.CTk):
@@ -15,8 +19,8 @@ class TrainingGUI(ctk.CTk):
         self.title("Physics Video Model Trainer")
         self.geometry("1200x850")
         
-        self.huge_font = ctk.CTkFont(family="Consolas", size=18)
-        self.bold_font = ctk.CTkFont(family="Consolas", size=18, weight="bold")
+        self.huge_font = ctk.CTkFont(family="DejaVu Sans Mono", size=18)
+        self.bold_font = ctk.CTkFont(family="DejaVu Sans Mono", size=18, weight="bold")
 
         os.makedirs("configs", exist_ok=True)
 
