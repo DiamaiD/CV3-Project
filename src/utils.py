@@ -3,10 +3,6 @@ import os
 from datetime import datetime
 
 class StreamToLogger:
-    """
-    Redirects stdout or stderr to both the terminal and a log file,
-    adding timestamps (with milliseconds) to the beginning of each line.
-    """
     def __init__(self, stream, filepath):
         self.stream = stream
         self.filepath = filepath
@@ -48,12 +44,6 @@ class StreamToLogger:
 
 
 def _unwrap(stream):
-    """Peel off any StreamToLogger wrappers to reach the genuine console stream.
-
-    Repeated runs in one process (the GUI stays alive between runs) must each wrap the REAL
-    stdout/stderr -- never the previous run's wrapper. Nesting wrappers is what made every run
-    re-timestamp the line and write it into all earlier runs' log files.
-    """
     while isinstance(stream, StreamToLogger):
         stream = stream.stream
     return stream
@@ -66,7 +56,6 @@ def setup_run_folder(env_name="bouncing"):
     os.makedirs(run_dir, exist_ok=True)
     log_filepath = os.path.join(run_dir, "log.txt")
 
-    # Wrap the true console streams, restoring first so back-to-back runs never nest wrappers.
     sys.stdout = StreamToLogger(_unwrap(sys.stdout), log_filepath)
     sys.stderr = StreamToLogger(_unwrap(sys.stderr), log_filepath)
 
@@ -76,7 +65,5 @@ def setup_run_folder(env_name="bouncing"):
 
 
 def teardown_run_logging():
-    """Restore the original console streams so the process is clean once a run finishes
-    (otherwise stray prints between runs keep landing in the last run's log.txt)."""
     sys.stdout = _unwrap(sys.stdout)
     sys.stderr = _unwrap(sys.stderr)

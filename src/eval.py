@@ -13,7 +13,6 @@ from torchvision import transforms
 
 
 def _psnr(mse_val):
-    """Peak signal-to-noise ratio for images in [0, 1] (so MAX_I = 1.0)."""
     if mse_val <= 0:
         return float("inf")
     return 10.0 * math.log10(1.0 / mse_val)
@@ -21,12 +20,6 @@ def _psnr(mse_val):
 
 @torch.no_grad()
 def flow_sample(dit, context_latents, num_steps):
-    """Euler ODE solver for the rectified flow: integrate the DiT's learned velocity field from
-    noise (t=0) to the predicted next-frame-chunk latents (t=1).
-
-    context_latents: (B, T, Cl, h, w). Returns the chunk z_1: (B, K, Cl, h, w) where K =
-    dit.chunk_len. Starts at z ~ N(0, I) and takes `num_steps` equal Euler steps
-    z <- z + v(z, t) * dt,  dt = 1 / num_steps. One call produces all K frames at once. """
     dit.eval()
     B = context_latents.shape[0]
     device = context_latents.device
@@ -40,10 +33,7 @@ def flow_sample(dit, context_latents, num_steps):
 
 
 @torch.no_grad()
-def _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps):
-    """One free-running chunk rollout. Returns per-SAMPLE (not batch-averaged) per-step pixel and
-    latent MSE -- (B, K) each -- plus the step-0 prediction (B, C, H, W). Per-sample errors let the
-    caller do best-of-N selection across independent rollouts (each call re-draws the ODE noise). """
+def _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps, use_amp=False):
     B, K = future_frames.shape[0], future_frames.shape[1]
     T = z_seq.shape[1]
     pix = torch.empty(B, K, device=future_frames.device)
@@ -52,42 +42,40 @@ def _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps):
     z_run = z_seq
     k = 0
     while k < K:
-        z_chunk = flow_sample(dit, z_run, num_steps)         # (B, chunk, Cl, gh, gw)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            z_chunk = flow_sample(dit, z_run, num_steps)
         chunk = z_chunk.shape[1]
         for j in range(chunk):
             if k >= K:
                 break
-            z_pred = z_chunk[:, j]
-            pred = ae.decode(z_pred * dit.latent_scale)          # normalized latent -> VAE scale
+            z_pred = z_chunk[:, j].float()
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                pred = ae.decode(z_pred * dit.latent_scale).float()
             pix[:, k] = ((pred - future_frames[:, k]) ** 2).flatten(1).mean(1)
             lat[:, k] = ((z_pred - z_future[:, k]) ** 2).flatten(1).mean(1)
             if k == 0:
                 step0 = pred
             k += 1
-        z_run = torch.cat([z_run, z_chunk], dim=1)[:, -T:]   # slide context by the chunk
+        z_run = torch.cat([z_run, z_chunk], dim=1)[:, -T:]
     return pix, lat, step0
 
 
 def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images=True,
-                   max_batches=None, best_of_n=1):
-    """Free-running chunk-rollout evaluation for the VAE + Flow Matching DiT.
-
-    At each horizon step the next-frame latent is sampled by integrating the DiT's velocity field
-    (Euler ODE, `num_steps`) from noise, conditioned on the current latent context window; the
-    prediction is decoded for the pixel metric and fed back as context (free-running, so error
-    compounds with horizon). Persistence -- holding the last real frame/latent constant -- is the
-    no-op baseline.
-
-    `max_batches` caps how many test batches are rolled out (each window x rollout costs
-    horizon x num_steps DiT forwards, so the full overlapping set is minutes to tens of minutes).
-
-    `best_of_n` > 1 samples that many INDEPENDENT rollouts per window and additionally reports the
-    best one (per trajectory, by mean pixel MSE). Single-sample MSE-to-truth punishes the flow
-    model for committing to a valid-but-different future (e.g. which way a ball bounces); best-of-N
-    asks whether at least one sample tracks the truth -- i.e. whether the model captured the
-    dynamics distribution or genuinely failed. It multiplies eval cost by N. """
+                   max_batches=None, best_of_n=1, compile_mode="off"):
     model_type = "FlowMatch"
     print(f"\n--- Phase 4: Final Test Set Evaluation ({model_type}) ---")
+
+    use_amp = str(device).startswith("cuda")
+    dit_run = dit
+    if compile_mode == "on" and use_amp:
+        try:
+            from torch import _dynamo
+            _dynamo.config.suppress_errors = True
+            dit_run = torch.compile(dit)
+            print("[Eval] torch.compile ON (Inductor); the first batch runs slow while graphs build.")
+        except Exception as e:
+            dit_run = dit
+            print(f"[Eval] torch.compile unavailable ({e}) -- running eager.")
 
     vis_ctx = vis_target = vis_pred = None
     bestN = best_of_n > 1
@@ -119,39 +107,33 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
             if stats is None:
                 stats = {key: [0.0] * K for key in metric_keys}
 
-            # Encode into the DiT's normalized latent space (/ scale); all latent metrics below and
-            # the rollout context therefore live in that same space, consistent with training.
-            z = ae.encode(ctx_frames.view(-1, C, H, W)) / dit.latent_scale   # VAE posterior mean (mu)
+            z = ae.encode(ctx_frames.view(-1, C, H, W)) / dit.latent_scale
             z_seq = z.view(B, T, *z.shape[1:])
-            z_last = z_seq[:, -1]                                   # last real frame/latent (persistence)
+            z_last = z_seq[:, -1]
             z_future = ae.encode(future_frames.reshape(B * K, C, H, W)).view(B, K, *z.shape[1:]) / dit.latent_scale
 
-            # Persistence baseline (hold the last real frame/latent constant), per sample per step.
             for k in range(K):
                 stats["persist_pix_mse"][k] += ((last_frame - future_frames[:, k]) ** 2).flatten(1).mean(1).sum().item()
                 stats["persist_lat_mse"][k] += ((z_last - z_future[:, k]) ** 2).flatten(1).mean(1).sum().item()
 
-            # N independent rollouts (each re-draws the ODE noise inside flow_sample).
             pix_runs, lat_runs, step0_first = [], [], None
             for n in range(best_of_n):
-                pix, lat, step0 = _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps)
+                pix, lat, step0 = _chunk_rollout(ae, dit_run, z_seq, future_frames, z_future, num_steps, use_amp=use_amp)
                 pix_runs.append(pix)
                 lat_runs.append(lat)
                 if n == 0:
                     step0_first = step0
-            pix_stack = torch.stack(pix_runs)                      # (N, B, K)
+            pix_stack = torch.stack(pix_runs)
             lat_stack = torch.stack(lat_runs)
 
-            # Single-sample metrics use the first rollout.
             for k in range(K):
                 stats["model_pix_mse"][k] += pix_stack[0, :, k].sum().item()
                 stats["model_lat_mse"][k] += lat_stack[0, :, k].sum().item()
 
-            # Best-of-N: per trajectory, keep the rollout with the lowest mean pixel MSE.
             if bestN:
-                best = pix_stack.mean(dim=2).argmin(dim=0)         # (B,) winning rollout per sample
+                best = pix_stack.mean(dim=2).argmin(dim=0)
                 ar = torch.arange(B, device=device)
-                best_pix, best_lat = pix_stack[best, ar], lat_stack[best, ar]   # (B, K)
+                best_pix, best_lat = pix_stack[best, ar], lat_stack[best, ar]
                 for k in range(K):
                     stats["bestN_pix_mse"][k] += best_pix[:, k].sum().item()
                     stats["bestN_lat_mse"][k] += best_lat[:, k].sum().item()
@@ -169,8 +151,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
         print("[Eval] No test samples (trajectories too short for context+horizon?). Skipping metrics.")
         return
 
-    # Inference cost: one ODE solve (`num_steps` DiT forwards) produces a whole K=chunk_len chunk,
-    # so per-frame cost is ~num_steps/K forwards; best_of_n multiplies the total.
     chunk_len = dit.chunk_len
     n_frames = total * K * best_of_n
     chunks_per_window = (K + chunk_len - 1) // chunk_len
@@ -186,7 +166,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
     def _skill(model_v, persist_v):
         return (persist_v - model_v) / persist_v * 100 if persist_v > 0 else 0.0
 
-    # Pixel-space table, one row per rollout step.
     print("\nPixel-space metrics by rollout horizon (model = free-running, fed its own predictions):")
     hdr = f"{'Step':>4} | {'Model MSE':>10} | {'Persist MSE':>11} | {'Skill%':>7} | {'Model PSNR':>10}"
     if bestN:
@@ -214,7 +193,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
         m, p = avg["model_lat_mse"][k], avg["persist_lat_mse"][k]
         print(f"{k+1:>4} | {m:>10.5f} | {p:>11.5f} | {_skill(m, p):>6.1f}%")
 
-    # Headline verdict uses single-step pixel MSE (step 1).
     m1, p1 = avg["model_pix_mse"][0], avg["persist_pix_mse"][0]
     verdict = "beats persistence" if m1 < p1 else "WORSE than persistence (no dynamics learned)"
     print(f"\n-> 1-step: Model is {_skill(m1, p1):+.1f}% vs persistence in pixel MSE  [{verdict}]")
@@ -227,7 +205,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
               f"avg skill {_skill(mean_b, mean_p):+.1f}% vs single {_skill(mean_m, mean_p):+.1f}%  "
               f"(big gap => metric was punishing valid alternative futures)")
 
-    # Persist everything we just printed so runs can be compared without re-parsing stdout.
     results = {
         "model_type": model_type,
         "num_samples": total,
@@ -276,7 +253,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
 
     if save_images and vis_pred is not None:
         num_samples = min(8, vis_target.size(0))
-        # 1-step PSNR over the shown samples (single-sample prediction), echoed in the header.
         vis_mse = ((vis_pred[:num_samples] - vis_target[:num_samples]) ** 2).mean().item()
         vis_psnr = _psnr(vis_mse)
         grid_imgs = []
@@ -294,7 +270,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
         img_np = np.clip(img_np, 0, 255).astype(np.uint8)
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-        # Header lines: (text, y, font_scale, thickness, color_BGR).
         font = cv2.FONT_HERSHEY_SIMPLEX
         margin = 10
         header_lines = [
@@ -318,7 +293,6 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
 
 
 def _save_reconstruction_grid(frames, recon, run_dir, filename, title):
-    """Write a [Truth | Reconstruction | Abs. Error x2] grid PNG with a header line `title`."""
     grid_imgs = []
     for j in range(frames.size(0)):
         truth, rec = frames[j].cpu(), recon[j].cpu()
@@ -348,23 +322,16 @@ def _save_reconstruction_grid(frames, recon, run_dir, filename, title):
 
 
 def _recon_batch_frames(loader, device, n_samples, tag):
-    """Pull one batch from `loader` and return the first `n_samples` real frames, or None."""
     batch = next(iter(loader), None)
     if batch is None:
         print(f"[{tag}] No frames available for reconstruction grid; skipping.")
         return None
     ctx_frames, _ = batch
-    return ctx_frames[:, -1].to(device)[:n_samples]      # one real frame per sample
+    return ctx_frames[:, -1].to(device)[:n_samples]
 
 
 @torch.no_grad()
 def save_vae_reconstructions(ae, loader, device, run_dir, n_samples=8):
-    """[Truth | Reconstruction | Abs. Error] grid for the VAE.
-
-    Encodes real frames to the posterior mean and decodes them -- the exact deterministic
-    path the dynamics model relies on -- so the image is a direct read on how much detail the
-    latent throws away. Written every run (even when the VAE is loaded from a checkpoint).
-    """
     ae.eval()
     frames = _recon_batch_frames(loader, device, n_samples, "VAE")
     if frames is None:
@@ -373,9 +340,6 @@ def save_vae_reconstructions(ae, loader, device, run_dir, n_samples=8):
     mse_val = nn.MSELoss()(recon, frames).item()
     psnr_val = _psnr(mse_val)
 
-    # Perceptual (LPIPS) read on the recon: lower = sharper / more on the natural-image manifold.
-    # This is the distance the perceptual VAE objective actually targets, so it is the honest
-    # quality number once pixel-MSE stops being meaningful. Skipped if `lpips` isn't installed.
     from src.train import build_lpips
     perceptual = build_lpips(device)
     lpips_str = ""
@@ -390,19 +354,11 @@ def save_vae_reconstructions(ae, loader, device, run_dir, n_samples=8):
 
 
 def _to_rgb(frame, out_wh):
-    """(C,H,W) float tensor in [0,1] -> upscaled RGB uint8 image of size out_wh=(w,h)."""
     img = (frame.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     return cv2.resize(img, out_wh, interpolation=cv2.INTER_NEAREST)
 
 
 def save_rollout_video(predict_chunk_fn, traj_dir, device, run_dir, context_len=5, n_steps=40, fps=10, scale=4):
-    """Side-by-side rollout GIF comparing two prediction regimes, stepping in chunks of K frames:
-      * Free-running: seed with `context_len` real frames, generate a K-frame chunk, append it,
-        slide the context forward by K using the model's OWN predictions (errors compound).
-      * Teacher forcing: predict each K-frame chunk from a window of REAL frames and slide by K
-        over real frames, so predictions never feed back (clean K-step-ahead forecast).
-    `predict_chunk_fn(context)` takes a (1, T, C, H, W) tensor and returns (1, K, C, H, W).
-    """
     to_tensor = transforms.ToTensor()
     frame_paths = sorted(glob.glob(os.path.join(traj_dir, "*.png")))
     n_steps = min(n_steps, len(frame_paths) - context_len)
@@ -417,22 +373,20 @@ def save_rollout_video(predict_chunk_fn, traj_dir, device, run_dir, context_len=
     free_preds = []
     tf_preds = []
     with torch.no_grad():
-        # Free-running: context absorbs the model's own predictions, K frames at a time.
-        context = frames[:context_len].unsqueeze(0)  # (1, T, C, H, W)
+        context = frames[:context_len].unsqueeze(0)
         while len(free_preds) < n_steps:
-            chunk = predict_chunk_fn(context)[0]      # (K, C, H, W)
+            chunk = predict_chunk_fn(context)[0]
             free_preds.extend(chunk.unbind(0))
             context = torch.cat([context, chunk.unsqueeze(0)], dim=1)[:, -context_len:]
 
-        # Teacher forcing: predict each chunk from REAL context, slide by K over real frames.
         p = 0
         while p < n_steps:
             tf_context = frames[p:p + context_len].unsqueeze(0)
-            chunk = predict_chunk_fn(tf_context)[0]   # (K, C, H, W) -> gt positions p .. p+K-1
+            chunk = predict_chunk_fn(tf_context)[0]
             tf_preds.extend(chunk.unbind(0))
             p += chunk.shape[0]
 
-    free_preds = torch.stack(free_preds[:n_steps])    # (n_steps, C, H, W)
+    free_preds = torch.stack(free_preds[:n_steps])
     tf_preds = torch.stack(tf_preds[:n_steps])
     gt = frames[context_len:context_len + n_steps]
 
