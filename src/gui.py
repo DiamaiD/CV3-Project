@@ -360,6 +360,11 @@ class TrainingGUI(ctk.CTk):
         self.dataname_entry = ctk.CTkEntry(self.datagen_frame, width=150, font=self.huge_font)
         self.dataname_entry.grid(row=1, column=1, columnspan=3, padx=10, pady=10, sticky="w")
 
+        self.supersample_label = ctk.CTkLabel(self.datagen_frame, text="Supersample:", font=self.bold_font)
+        self.supersample_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
+        self.supersample_menu = ctk.CTkOptionMenu(self.datagen_frame, values=["1", "2", "4"], font=self.huge_font, width=80)
+        self.supersample_menu.grid(row=1, column=5, padx=10, pady=10, sticky="w")
+
         self.res_label = ctk.CTkLabel(self.datagen_frame, text="Resolution:", font=self.bold_font)
         self.res_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
         self.res_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
@@ -449,6 +454,7 @@ class TrainingGUI(ctk.CTk):
             n_traj = int(self.traj_entry.get())
             bmin, bmax = int(self.balls_min_entry.get()), int(self.balls_max_entry.get())
             smin, smax = float(self.speed_min_entry.get()), float(self.speed_max_entry.get())
+            ss = int(self.supersample_menu.get())
         except ValueError:
             self.log_textbox.insert("end", "[Error] Data-generation fields must be valid numbers!\n")
             return
@@ -468,9 +474,9 @@ class TrainingGUI(ctk.CTk):
         self.log_textbox.insert("end", f"[System] Generating {n_traj} trajectories ({res}x{res}) into {data_dir} ...\n")
         self.log_textbox.see("end")
         threading.Thread(target=self._run_generation,
-                         args=(data_dir, n_traj, res, bmin, bmax, smin, smax), daemon=True).start()
+                         args=(data_dir, n_traj, res, bmin, bmax, smin, smax, ss), daemon=True).start()
 
-    def _run_generation(self, data_dir, n_traj, res, bmin, bmax, smin, smax):
+    def _run_generation(self, data_dir, n_traj, res, bmin, bmax, smin, smax, ss):
         def cb(done, total):
             self.after(0, lambda d=done, t=total: self.datagen_status.configure(text=f"{d}/{t}"))
         try:
@@ -479,7 +485,7 @@ class TrainingGUI(ctk.CTk):
                 self.after(0, lambda: self.log_textbox.insert("end", f"[System] Removed existing dataset at {data_dir}.\n"))
             generate_bouncing_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
                                    n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
-                                   progress_cb=cb)
+                                   supersample=ss, progress_cb=cb)
             self.after(0, lambda: self._on_generation_done(data_dir, n_traj))
         except Exception as e:
             self.after(0, lambda err=e: self.log_textbox.insert("end", f"[Error] Generation failed: {err}\n"))
@@ -569,6 +575,7 @@ class TrainingGUI(ctk.CTk):
                 self.balls_max_entry.delete(0, "end"); self.balls_max_entry.insert(0, str(c.get("n_balls_max", 5)))
                 self.speed_min_entry.delete(0, "end"); self.speed_min_entry.insert(0, str(c.get("speed_min", 3.0)))
                 self.speed_max_entry.delete(0, "end"); self.speed_max_entry.insert(0, str(c.get("speed_max", 8.0)))
+                self.supersample_menu.set(str(c.get("datagen_supersample", 1)))
                 self.log_textbox.insert("end", f"[System] Settings loaded from {CONFIG_FILE}\n")
             except Exception as e:
                 self.log_textbox.insert("end", f"[Error] Load config failed: {e}\n")
@@ -694,7 +701,8 @@ class TrainingGUI(ctk.CTk):
                 "n_balls_min": int(self.balls_min_entry.get()),
                 "n_balls_max": int(self.balls_max_entry.get()),
                 "speed_min": float(self.speed_min_entry.get()),
-                "speed_max": float(self.speed_max_entry.get())
+                "speed_max": float(self.speed_max_entry.get()),
+                "datagen_supersample": int(self.supersample_menu.get())
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=4)

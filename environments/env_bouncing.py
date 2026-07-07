@@ -86,7 +86,9 @@ def _resolve_ball_collisions(balls):
 
 def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_frames=100,
                            width=WIDTH, height=HEIGHT, n_balls_min=1, n_balls_max=5,
-                           speed_min=3.0, speed_max=8.0, n_substeps=4, progress_cb=None):
+                           speed_min=3.0, speed_max=8.0, n_substeps=4, supersample=1,
+                           progress_cb=None):
+    ss = max(1, int(supersample))
     os.makedirs(data_dir, exist_ok=True)
     report_every = max(1, n_trajectories // 100)
     dt = 1.0 / n_substeps
@@ -101,11 +103,13 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
         positions, velocities = [], []
 
         for frame in range(max_frames):
-            img = np.ones((height, width, 3), dtype=np.uint8) * 255
+            img = np.ones((height * ss, width * ss, 3), dtype=np.uint8) * 255
             for b in balls:
-                center = (round(b["x"] * _SUBPIX), round((height - b["y"]) * _SUBPIX))
-                cv2.circle(img, center, round(b["radius"] * _SUBPIX), b["mat"]["color"], -1,
+                center = (round((b["x"] * ss - 0.5) * _SUBPIX), round(((height - b["y"]) * ss - 0.5) * _SUBPIX))
+                cv2.circle(img, center, round(b["radius"] * ss * _SUBPIX), b["mat"]["color"], -1,
                            lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
+            if ss > 1:
+                img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
             cv2.imwrite(os.path.join(traj_dir, f'frame_{frame:03d}.png'), img)
 
             positions.append([(b["x"], b["y"]) for b in balls])
