@@ -6,6 +6,7 @@ import shutil
 from tkinter import filedialog
 from src.main import run_training_pipeline
 from environments.env_bouncing import generate_bouncing_data
+from environments.env_bouncing_rigid import generate_bouncing_data as generate_bouncing_rigid_data
 from environments.env_inclined_plane import generate_slope_data
 
 CONFIG_FILE = "configs/model_config.json"
@@ -414,7 +415,7 @@ class TrainingGUI(ctk.CTk):
 
         self.datatype_label = ctk.CTkLabel(self.datagen_frame, text="Physics Type:", font=self.bold_font)
         self.datatype_label.grid(row=1, column=3, padx=10, pady=10, sticky="e")
-        self.datatype_menu = ctk.CTkOptionMenu(self.datagen_frame, values=["bouncing", "inclined_plane"], font=self.huge_font, width=180, command=self._on_physics_type_changed)
+        self.datatype_menu = ctk.CTkOptionMenu(self.datagen_frame, values=["bouncing", "rigid", "inclined_plane"], font=self.huge_font, width=180, command=self._on_physics_type_changed)
         self.datatype_menu.grid(row=1, column=4, columnspan=2, padx=10, pady=10, sticky="w")
 
         self.res_label = ctk.CTkLabel(self.datagen_frame, text="Resolution:", font=self.bold_font)
@@ -552,6 +553,10 @@ class TrainingGUI(ctk.CTk):
                 generate_bouncing_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
                                        n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
                                        progress_cb=cb)
+            elif env_type == "rigid":
+                generate_bouncing_rigid_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
+                                             n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
+                                             progress_cb=cb)
             elif env_type == "inclined_plane":
                 generate_slope_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
                                     n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
