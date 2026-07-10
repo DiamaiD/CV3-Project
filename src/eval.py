@@ -32,6 +32,105 @@ def flow_sample(dit, context_latents, num_steps):
     return z_t
 
 
+def _traj_event_labels(traj_dir, count, gravity=-0.5, kick_thresh=1.5, pair_dist=18.0, post_frames=3):
+    pos = np.load(os.path.join(traj_dir, "positions.npy"))
+    vel = np.load(os.path.join(traj_dir, "velocities.npy"))
+    T = min(len(pos), count)
+    labels = np.zeros(count, dtype=np.int8)
+    if T < 2:
+        return labels
+    dv = vel[1:T] - vel[:T - 1]
+    dv[:, :, 1] -= gravity
+    mag = np.linalg.norm(dv, axis=2)
+    bb = np.zeros(T - 1, dtype=bool)
+    wall = np.zeros(T - 1, dtype=bool)
+    for t in range(T - 1):
+        hit = np.where(mag[t] > kick_thresh)[0]
+        paired = set()
+        for a in range(len(hit)):
+            for b in range(a + 1, len(hit)):
+                i, j = hit[a], hit[b]
+                if np.linalg.norm(pos[t, i] - pos[t, j]) < pair_dist:
+                    paired.update((i, j))
+        if paired:
+            bb[t] = True
+        if any(i not in paired for i in hit):
+            wall[t] = True
+    for f in range(1, T):
+        t = f - 1
+        if bb[t]:
+            labels[f] = 3
+        elif bb[max(0, t - post_frames):t].any():
+            labels[f] = 2
+        elif wall[t]:
+            labels[f] = 1
+    return labels
+
+
+COLL_EVENT_NAMES = ["free flight", "wall bounce", "post ball-ball (1-3f)", "ball-ball contact"]
+
+
+@torch.no_grad()
+def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
+                               num_steps, run_dir, device, batch_size=256):
+    ctx_idx, tgt_idx = frame_cache.build_windows(test_trajs, context_len, 1)
+    if ctx_idx.shape[0] == 0:
+        print("[CollEval] No 1-step windows; skipping collision-conditioned eval.")
+        return
+    labels_g = torch.zeros(frame_cache.frames.shape[0], dtype=torch.int8)
+    n_missing = 0
+    for t in sorted(test_trajs):
+        name = os.path.basename(t)
+        if name not in frame_cache.ranges:
+            continue
+        start, count = frame_cache.ranges[name]
+        if not os.path.exists(os.path.join(t, "positions.npy")):
+            n_missing += 1
+            continue
+        labels_g[start:start + count] = torch.from_numpy(_traj_event_labels(t, count))
+    if n_missing:
+        print(f"[CollEval] {n_missing} test trajs lack positions.npy (labeled free flight).")
+
+    win_labels = labels_g[tgt_idx[:, 0].cpu()]
+    ae.eval(); dit.eval()
+    scale = dit.latent_scale
+    frames = frame_cache.frames
+    use_amp = str(device).startswith("cuda")
+    se = torch.zeros(4, dtype=torch.float64)
+    cnt = torch.zeros(4, dtype=torch.float64)
+    for i in range(0, ctx_idx.shape[0], batch_size):
+        ci, ti = ctx_idx[i:i + batch_size], tgt_idx[i:i + batch_size, 0]
+        z_ctx = z_all[ci].float().to(device)
+        tgt = frames[ti].to(device).float().div_(255.0)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            z_pred = flow_sample(dit, z_ctx, num_steps)[:, 0].float()
+            pred = ae.decode(z_pred * scale).float()
+        err = ((pred - tgt) ** 2).flatten(1).mean(1).double().cpu()
+        lab = win_labels[i:i + batch_size]
+        for k in range(4):
+            m = lab == k
+            if m.any():
+                se[k] += err[m].sum()
+                cnt[k] += int(m.sum())
+
+    print("\n[CollEval] 1-step prediction error by event at the target frame:")
+    print(f"{'event':>24} | {'windows':>8} | {'MSE':>10} | {'PSNR':>8} | {'vs free':>8}")
+    results = {}
+    free_mse = (se[0] / cnt[0]).item() if cnt[0] > 0 else float("nan")
+    for k in range(4):
+        if cnt[k] == 0:
+            continue
+        mse = (se[k] / cnt[k]).item()
+        ratio = mse / free_mse if free_mse > 0 else float("nan")
+        print(f"{COLL_EVENT_NAMES[k]:>24} | {int(cnt[k]):>8} | {mse:>10.6f} | {_psnr(mse):>7.2f} | {ratio:>7.2f}x")
+        results[COLL_EVENT_NAMES[k]] = {"windows": int(cnt[k]), "mse": mse,
+                                        "psnr": _psnr(mse), "mse_vs_free": ratio}
+    path = os.path.join(run_dir, "collision_eval.json")
+    with open(path, "w") as f:
+        json.dump(results, f, indent=4)
+    print(f"[CollEval] Saved to {path}")
+
+
 @torch.no_grad()
 def _chunk_rollout(ae, dit, z_seq, future_frames, z_future, num_steps, use_amp=False):
     B, K = future_frames.shape[0], future_frames.shape[1]

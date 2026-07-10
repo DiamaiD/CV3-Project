@@ -283,11 +283,14 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
     max_consec_skip = 20
     consec_skip = 0
     spike_floor = 0.5
+    spike_guard_cutoff = int(0.8 * total_steps)
     gnorm_ema = None
     n_accept = 0
     if use_spike_guard:
         print(f"[FM] Grad-spike guard on: drop steps whose pre-clip norm > {spike_factor:g}x the "
-              f"running mean (active after {spike_warmup} steps).")
+              f"running mean (active after {spike_warmup} steps, off for the final 20% of training "
+              f"where the low LR bounds step size and late-stage gradients carry tail signal; "
+              f"inf/nan overflow skips stay on throughout).")
     _loss_desc = f"pseudo-Huber (c={huber_c:g})" if loss_type == "huber" else "MSE"
     print(f"[FM] Objective: {_loss_desc} loss | t ~ {t_dist}.")
 
@@ -352,7 +355,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             gval = gnorm.item()
             finite = math.isfinite(gval)
-            spike = (use_spike_guard and finite and gnorm_ema is not None
+            spike = (use_spike_guard and scheduler.last_epoch < spike_guard_cutoff
+                     and finite and gnorm_ema is not None
                      and n_accept >= spike_warmup and gval > spike_factor * gnorm_ema
                      and gval > spike_floor)
             if spike and consec_skip >= max_consec_skip:

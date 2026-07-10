@@ -183,6 +183,8 @@ class DiTBlock(nn.Module):
 
         self.norm1 = nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-6)
         self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
         self.proj = nn.Linear(d_model, d_model)
 
         self.norm2 = nn.LayerNorm(d_model, elementwise_affine=False, eps=1e-6)
@@ -199,6 +201,7 @@ class DiTBlock(nn.Module):
     def _attn(self, x):
         B, L, D = x.shape
         q, k, v = self.qkv(x).view(B, L, 3, self.n_heads, self.head_dim).unbind(2)
+        q, k = self.q_norm(q), self.k_norm(k)
         q, k, v = (t.transpose(1, 2) for t in (q, k, v))
         out = F.scaled_dot_product_attention(
             q, k, v, dropout_p=self.dropout if self.training else 0.0)

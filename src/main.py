@@ -13,7 +13,8 @@ from src.dataset import FrameCache, CachedLoader
 from src.models import CNNVAE, DiffusionTransformer
 from src.train import (train_autoencoder, build_latent_cache, train_flow_matching,
                        score_latent_predictability, retrain_decoder)
-from src.eval import run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample
+from src.eval import (run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample,
+                      collision_conditioned_eval)
 from src.utils import setup_run_folder, teardown_run_logging
 
 
@@ -179,6 +180,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                    best_of_n=eval_best_of_n, n_pngs=eval_n_pngs, compile_mode=compile_mode)
 
     ae.eval(); dit.eval()
+
+    collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
+                               num_steps=inference_steps, run_dir=run_dir, device=device)
 
     def flow_predict_chunk(context):
         _, T, C, H, W = context.shape
