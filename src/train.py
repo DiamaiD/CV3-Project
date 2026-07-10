@@ -308,6 +308,9 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
     use_ema = ema_decay is not None and ema_decay > 0.0
     ema = {n: p.detach().clone() for n, p in model.named_parameters()} if use_ema else None
     if use_ema:
+        ema_list = list(ema.values())
+        ema_params = [p for _, p in model.named_parameters()]
+    if use_ema:
         print(f"[FM] Weight EMA on: decay {ema_decay} (warmed up); final eval + dit.pth use the EMA weights.")
     if context_noise > 0.0:
         print(f"[FM] Context-latent noise on: std {context_noise} (training only; rollout-robustness regularizer).")
@@ -370,8 +373,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
                 if use_ema:
                     d = min(ema_decay, (gstep + 1) / (gstep + 11))
                     with torch.no_grad():
-                        for n, p in model.named_parameters():
-                            ema[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
+                        torch._foreach_mul_(ema_list, d)
+                        torch._foreach_add_(ema_list, ema_params, alpha=1.0 - d)
                     gstep += 1
                 tr_loss += loss.detach()
                 tr_gnorm += gnorm.detach()
