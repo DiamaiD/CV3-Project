@@ -212,6 +212,12 @@ class TrainingGUI(ctk.CTk):
         self.spike_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.spike_entry.grid(row=5, column=3, padx=10, pady=10, sticky="w")
 
+        self.event_weights_label = ctk.CTkLabel(self.dyn_frame, text="Event Weights:", font=self.bold_font)
+        self.event_weights_label.grid(row=5, column=4, padx=10, pady=10, sticky="e")
+        self.event_weights_entry = ctk.CTkEntry(self.dyn_frame, width=140, font=self.huge_font,
+                                                placeholder_text="free,wall,post,bb")
+        self.event_weights_entry.grid(row=5, column=5, padx=10, pady=10, sticky="w")
+
         self.tdist_label = ctk.CTkLabel(self.dyn_frame, text="T-Dist:", font=self.bold_font)
         self.tdist_label.grid(row=6, column=0, padx=10, pady=10, sticky="e")
         self.tdist_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["logit_normal", "uniform"], font=self.huge_font, width=150)
@@ -549,6 +555,7 @@ class TrainingGUI(ctk.CTk):
                 self.ae_precision_menu.set(c.get("ae_precision", "bf16"))
                 self.dec_precision_menu.set(c.get("dec_precision", "bf16"))
                 self.spike_entry.delete(0, "end"); self.spike_entry.insert(0, str(c.get("dit_spike_factor", 4.0)))
+                self.event_weights_entry.delete(0, "end"); self.event_weights_entry.insert(0, str(c.get("dit_event_weights", "")))
                 self.tdist_menu.set(c.get("dit_t_dist", "logit_normal"))
                 self.loss_menu.set(c.get("dit_loss", "mse"))
                 self.huberc_entry.delete(0, "end"); self.huberc_entry.insert(0, str(c.get("dit_huber_c", 1.0)))
@@ -676,6 +683,7 @@ class TrainingGUI(ctk.CTk):
                 "ae_precision": self.ae_precision_menu.get(),
                 "dec_precision": self.dec_precision_menu.get(),
                 "dit_spike_factor": float(self.spike_entry.get()),
+                "dit_event_weights": self.event_weights_entry.get().strip(),
                 "dit_t_dist": self.tdist_menu.get(),
                 "dit_loss": self.loss_menu.get(),
                 "dit_huber_c": float(self.huberc_entry.get()),
@@ -756,6 +764,7 @@ class TrainingGUI(ctk.CTk):
             ae_precision=c.get('ae_precision', "bf16"),
             dec_precision=c.get('dec_precision', "bf16"),
             dit_spike_factor=c.get('dit_spike_factor', 4.0),
+            dit_event_weights=c.get('dit_event_weights', ""),
             dit_t_dist=c.get('dit_t_dist', "logit_normal"),
             dit_loss=c.get('dit_loss', "mse"), dit_huber_c=c.get('dit_huber_c', 1.0),
             ae_grad_clip=c.get('ae_grad_clip', 10.0), dit_grad_clip=c.get('dit_grad_clip', 3.0),

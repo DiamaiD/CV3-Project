@@ -70,16 +70,10 @@ def _traj_event_labels(traj_dir, count, gravity=-0.5, kick_thresh=1.5, pair_dist
 COLL_EVENT_NAMES = ["free flight", "wall bounce", "post ball-ball (1-3f)", "ball-ball contact"]
 
 
-@torch.no_grad()
-def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
-                               num_steps, run_dir, device, batch_size=256):
-    ctx_idx, tgt_idx = frame_cache.build_windows(test_trajs, context_len, 1)
-    if ctx_idx.shape[0] == 0:
-        print("[CollEval] No 1-step windows; skipping collision-conditioned eval.")
-        return
+def build_event_labels(frame_cache, trajs):
     labels_g = torch.zeros(frame_cache.frames.shape[0], dtype=torch.int8)
     n_missing = 0
-    for t in sorted(test_trajs):
+    for t in sorted(trajs):
         name = os.path.basename(t)
         if name not in frame_cache.ranges:
             continue
@@ -88,6 +82,17 @@ def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_
             n_missing += 1
             continue
         labels_g[start:start + count] = torch.from_numpy(_traj_event_labels(t, count))
+    return labels_g, n_missing
+
+
+@torch.no_grad()
+def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
+                               num_steps, run_dir, device, batch_size=256):
+    ctx_idx, tgt_idx = frame_cache.build_windows(test_trajs, context_len, 1)
+    if ctx_idx.shape[0] == 0:
+        print("[CollEval] No 1-step windows; skipping collision-conditioned eval.")
+        return
+    labels_g, n_missing = build_event_labels(frame_cache, test_trajs)
     if n_missing:
         print(f"[CollEval] {n_missing} test trajs lack positions.npy (labeled free flight).")
 

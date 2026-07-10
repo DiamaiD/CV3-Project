@@ -14,7 +14,7 @@ from src.models import CNNVAE, DiffusionTransformer
 from src.train import (train_autoencoder, build_latent_cache, train_flow_matching,
                        score_latent_predictability, retrain_decoder)
 from src.eval import (run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample,
-                      collision_conditioned_eval)
+                      collision_conditioned_eval, build_event_labels)
 from src.utils import setup_run_folder, teardown_run_logging
 
 
@@ -25,13 +25,28 @@ def run_training_pipeline(*args, **kwargs):
         teardown_run_logging()
 
 
+def _parse_event_weights(s):
+    s = str(s).strip()
+    if not s or s == "0":
+        return None
+    try:
+        w = [float(x) for x in s.split(",")]
+    except ValueError:
+        w = []
+    if len(w) != 4 or any(v < 0 for v in w) or sum(w) <= 0:
+        print(f"[Warn] Event weights '{s}' invalid (want 4 non-negative numbers: free,wall,post,bb) "
+              f"-- uniform sampling.")
+        return None
+    return w
+
+
 def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
                           dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16", dit_temporal=False,
-                          compile_mode="off", dit_spike_factor=4.0,
+                          compile_mode="off", dit_spike_factor=4.0, dit_event_weights="",
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
                           dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
                           dec_rollout_k=5, dec_clean_frac=0.3, dec_grad_clip=10.0, dec_res_blocks=1,
@@ -140,7 +155,23 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         dit.load_state_dict(torch.load(dit_checkpoint, map_location=device, weights_only=True))
         print(f"Loaded DiT from {dit_checkpoint} -- skipping Phase 2.")
     else:
-        dit = train_flow_matching(dit, latent_loader(train_trajs, chunk_len, True, dyn_batch_size),
+        fm_train = latent_loader(train_trajs, chunk_len, True, dyn_batch_size)
+        ev = _parse_event_weights(dit_event_weights)
+        if ev is not None:
+            labels_g, n_missing = build_event_labels(frame_cache, train_trajs)
+            if n_missing == len(train_trajs):
+                print("[FM] Event weights set but no positions.npy in the dataset -- uniform sampling.")
+            else:
+                sev = labels_g[fm_train.tgt_index.cpu()].max(dim=1).values.long()
+                fm_train.sample_weights = torch.tensor(ev)[sev].to(fm_train.ctx_index.device)
+                nat = torch.bincount(sev, minlength=4).double()
+                mix = nat * torch.tensor(ev, dtype=torch.float64)
+                nat, mix = 100 * nat / nat.sum(), 100 * mix / mix.sum()
+                wtxt = "/".join(f"{v:g}" for v in ev)
+                print(f"[FM] Event-weighted sampling ON (free/wall/post/bb = {wtxt}): "
+                      f"batch mix {mix[0]:.0f}/{mix[1]:.0f}/{mix[2]:.0f}/{mix[3]:.0f}% "
+                      f"vs natural {nat[0]:.0f}/{nat[1]:.0f}/{nat[2]:.0f}/{nat[3]:.0f}%.")
+        dit = train_flow_matching(dit, fm_train,
                                   latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
                                   epochs=dyn_epochs, learning_rate=dyn_learning_rate,
                                   weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,

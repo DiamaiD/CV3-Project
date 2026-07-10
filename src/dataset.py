@@ -114,7 +114,7 @@ class FrameCache:
 
 class CachedLoader:
     def __init__(self, source, ctx_index, tgt_index, batch_size, device,
-                 shuffle=False, horizon=1):
+                 shuffle=False, horizon=1, sample_weights=None):
         self.source = source
         self.ctx_index = ctx_index
         self.tgt_index = tgt_index
@@ -122,6 +122,7 @@ class CachedLoader:
         self.device = torch.device(device)
         self.shuffle = shuffle
         self.horizon = horizon
+        self.sample_weights = sample_weights
         self.is_uint8 = source.dtype == torch.uint8
         self.S = ctx_index.shape[0]
 
@@ -137,8 +138,11 @@ class CachedLoader:
         return x
 
     def __iter__(self):
-        order = (torch.randperm(self.S, device=self.ctx_index.device) if self.shuffle
-                 else torch.arange(self.S, device=self.ctx_index.device))
+        if self.shuffle and self.sample_weights is not None:
+            order = torch.multinomial(self.sample_weights, self.S, replacement=True).to(self.ctx_index.device)
+        else:
+            order = (torch.randperm(self.S, device=self.ctx_index.device) if self.shuffle
+                     else torch.arange(self.S, device=self.ctx_index.device))
         for i in range(0, self.S, self.batch_size):
             rows = order[i : i + self.batch_size]
             ctx = self._to_float(self.source[self.ctx_index[rows]])

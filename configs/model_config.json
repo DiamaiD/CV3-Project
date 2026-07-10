@@ -60,5 +60,6 @@
     "n_balls_max": 5,
     "speed_min": 3.0,
     "speed_max": 10.0,
-    "datagen_supersample": 4
+    "datagen_supersample": 4,
+    "dit_event_weights": ""
 }
