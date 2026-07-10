@@ -33,7 +33,6 @@
     "dit_precision": "bf16",
     "ae_precision": "bf16",
     "dec_precision": "bf16",
-    "dit_spike_factor": 0.0,
     "dit_t_dist": "logit_normal",
     "dit_loss": "huber",
     "dit_huber_c": 1.0,
@@ -61,5 +60,5 @@
     "speed_min": 3.0,
     "speed_max": 10.0,
     "datagen_supersample": 4,
-    "dit_event_weights": ""
+    "dit_event_weights": "0.5,2,2,4"
 }

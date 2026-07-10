@@ -251,7 +251,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
 
 def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
                         weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999, context_noise=0.0,
-                        precision="bf16", spike_factor=4.0, compile_mode="off",
+                        precision="bf16", compile_mode="off",
                         t_dist="logit_normal", loss_type="mse", huber_c=1.0, device="cuda"):
     print("--- Phase 2: Training Flow Matching DiT (chunk prediction) ---")
     model.to(device)
@@ -278,19 +278,6 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         print(f"[FM] Mixed precision ON: {precision} autocast (fp32 master weights, {scaling}).")
     scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and precision == "fp16"))
 
-    use_spike_guard = bool(spike_factor and spike_factor > 0.0)
-    spike_warmup = 50
-    max_consec_skip = 20
-    consec_skip = 0
-    spike_floor = 0.5
-    spike_guard_cutoff = int(0.8 * total_steps)
-    gnorm_ema = None
-    n_accept = 0
-    if use_spike_guard:
-        print(f"[FM] Grad-spike guard on: drop steps whose pre-clip norm > {spike_factor:g}x the "
-              f"running mean (active after {spike_warmup} steps, off for the final 20% of training "
-              f"where the low LR bounds step size and late-stage gradients carry tail signal; "
-              f"inf/nan overflow skips stay on throughout).")
     _loss_desc = f"pseudo-Huber (c={huber_c:g})" if loss_type == "huber" else "MSE"
     print(f"[FM] Objective: {_loss_desc} loss | t ~ {t_dist}.")
 
@@ -348,7 +335,6 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         model.train()
         tr_loss = torch.zeros((), device=device)
         tr_gnorm = torch.zeros((), device=device)
-        n_spike = 0
         n_overflow = 0
         for z_seq, z_future in train_loader:
             optimizer.zero_grad(set_to_none=True)
@@ -356,20 +342,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            gval = gnorm.item()
-            finite = math.isfinite(gval)
-            spike = (use_spike_guard and scheduler.last_epoch < spike_guard_cutoff
-                     and finite and gnorm_ema is not None
-                     and n_accept >= spike_warmup and gval > spike_factor * gnorm_ema
-                     and gval > spike_floor)
-            if spike and consec_skip >= max_consec_skip:
-                spike = False
-            take_step = finite and not spike
-            if take_step:
+            if math.isfinite(gnorm.item()):
                 scaler.step(optimizer)
-                gnorm_ema = gval if gnorm_ema is None else 0.98 * gnorm_ema + 0.02 * gval
-                n_accept += 1
-                consec_skip = 0
                 if use_ema:
                     d = min(ema_decay, (gstep + 1) / (gstep + 11))
                     with torch.no_grad():
@@ -378,12 +352,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
                     gstep += 1
                 tr_loss += loss.detach()
                 tr_gnorm += gnorm.detach()
-            elif not finite:
-                n_overflow += 1
-                consec_skip += 1
             else:
-                n_spike += 1
-                consec_skip += 1
+                n_overflow += 1
             scaler.update()
             scheduler.step()
 
@@ -393,10 +363,9 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
             for z_seq, z_future in val_loader:
                 val_loss += _flow_batch(z_seq, z_future)
 
-        nb_tr, nb_val = max(len(train_loader) - n_spike - n_overflow, 1), len(val_loader)
+        nb_tr, nb_val = max(len(train_loader) - n_overflow, 1), len(val_loader)
         epoch_time = time.time() - start_time
-        parts = ([f"{n_spike} spike"] if n_spike else []) + ([f"{n_overflow} overflow"] if n_overflow else [])
-        skipped = f" | Skipped: {', '.join(parts)}" if parts else ""
+        skipped = f" | Skipped: {n_overflow} overflow" if n_overflow else ""
         print(f"FM Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | "
               f"LR: {scheduler.get_last_lr()[0]:.2e} | GradNorm: {tr_gnorm.item()/nb_tr:.3f} | "
               f"Train Loss: {tr_loss.item()/nb_tr:.6f} | Val Loss: {val_loss.item()/nb_val:.6f}{skipped}")

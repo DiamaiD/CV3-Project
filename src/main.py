@@ -27,7 +27,7 @@ def run_training_pipeline(*args, **kwargs):
 
 def _parse_event_weights(s):
     s = str(s).strip()
-    if not s or s == "0":
+    if not s or s in ("0", "off"):
         return None
     try:
         w = [float(x) for x in s.split(",")]
@@ -46,7 +46,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
                           dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16", dit_temporal=False,
-                          compile_mode="off", dit_spike_factor=4.0, dit_event_weights="",
+                          compile_mode="off", dit_event_weights="off",
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
                           dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
                           dec_rollout_k=5, dec_clean_frac=0.3, dec_grad_clip=10.0, dec_res_blocks=1,
@@ -176,7 +176,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                   epochs=dyn_epochs, learning_rate=dyn_learning_rate,
                                   weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
                                   ema_decay=dit_ema_decay, context_noise=dit_context_noise,
-                                  precision=dit_precision, spike_factor=dit_spike_factor,
+                                  precision=dit_precision,
                                   compile_mode=compile_mode, t_dist=dit_t_dist,
                                   loss_type=dit_loss, huber_c=dit_huber_c, device=device)
     torch.save(dit.state_dict(), os.path.join(run_dir, "dit.pth"))
@@ -253,7 +253,7 @@ if __name__ == "__main__":
     parser.add_argument("--dit_grad_clip", type=float, default=3.0, help="Max global grad norm for the DiT (clipped each step). Safety net against loss-spike NaN divergence; the logged GradNorm shows whether it's biting. Set ~2-3x above the steady-state norm (which rode 1.2-1.4 late in training, so 1.0 was clipping healthy steps).")
     parser.add_argument("--dit_ema_decay", type=float, default=0.999, help="Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights. Standard diffusion/flow trick, usually worth a few tenths of a dB.")
     parser.add_argument("--dit_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="DiT training compute precision. bf16/fp16 halve memory traffic (~2x epoch speed at >=8192 token-rows/step) with fp32 master weights; fp16 adds dynamic loss scaling whose inf/nan step-skip doubles as a spike guard (bf16 measured divergent on the temporal layout). fp32 = no autocast, the proven-stable reference. Weights/eval/checkpoints are fp32 in every mode.")
-    parser.add_argument("--dit_spike_factor", type=float, default=4.0, help="Grad-spike guard: drop any DiT step whose pre-clip grad norm exceeds this multiple of the running mean of accepted norms (0 = off). fp32 never spikes, so a spike is a low-precision artifact that clipping can't fix (it caps magnitude, not direction); dropping the step keeps AdamW's moments clean. This is what makes bf16/compiled-fp16 as stable as fp32.")
+    parser.add_argument("--dit_event_weights", type=str, default="off", help="Event-weighted window sampling for DiT training: 4 comma-separated weights (free,wall,post,bb) applied to target-frame event classes, e.g. 0.5,2,2,4 to oversample collisions. Requires positions.npy/velocities.npy in the dataset. off = uniform.")
     parser.add_argument("--dit_t_dist", choices=["logit_normal", "uniform"], default="logit_normal", help="Flow-matching timestep sampling. logit_normal (SD3) draws t=sigmoid(N(0,1)), concentrating training on the hard middle of the trajectory; uniform is plain U(0,1). Same optimum, different emphasis -- logit_normal is a consistent quality win at no extra cost.")
     parser.add_argument("--dit_loss", choices=["mse", "huber"], default="mse", help="DiT velocity loss. mse = standard flow-matching L2 (regression to the conditional mean velocity). huber = pseudo-Huber sqrt(err^2+c^2)-c, whose per-element gradient saturates for large errors, so an outlier sample can't produce an unbounded gradient -- curbs precision-induced spikes at the source.")
     parser.add_argument("--dit_huber_c", type=float, default=1.0, help="Pseudo-Huber transition constant c (only used when --dit_loss huber). Errors >> c behave like L1, << c like L2. Velocity targets have per-element std ~1.4 in the normalized latent space, so c~1.0 balances robustness against fidelity; smaller c = more robust but further from L2's optimum.")
@@ -301,7 +301,7 @@ if __name__ == "__main__":
         dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay,
         dit_grad_clip=args.dit_grad_clip, dit_ema_decay=args.dit_ema_decay,
         dit_precision=("fp32" if args.dit_fp32 else args.dit_precision), dit_temporal=args.dit_temporal,
-        dit_spike_factor=args.dit_spike_factor,
+        dit_event_weights=args.dit_event_weights,
         dit_t_dist=args.dit_t_dist, dit_loss=args.dit_loss, dit_huber_c=args.dit_huber_c,
         compile_mode=args.compile,
         ae_precision=args.ae_precision, dec_precision=args.dec_precision,
