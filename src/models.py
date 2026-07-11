@@ -217,30 +217,22 @@ class DiTBlock(nn.Module):
 
 class DiffusionTransformer(nn.Module):
     def __init__(self, latent_ch=32, context_len=5, grid=8, chunk_len=5,
-                 d_model=256, n_layers=6, n_heads=8, dropout=0.0, latent_scale=1.0,
-                 temporal_tokens=False):
+                 d_model=256, n_layers=6, n_heads=8, dropout=0.0, latent_scale=1.0):
         super().__init__()
         self.latent_ch = latent_ch
         self.context_len = context_len
         self.grid = grid
         self.chunk_len = chunk_len
         self.register_buffer("latent_scale", torch.as_tensor(latent_scale, dtype=torch.float32))
-        self.temporal_tokens = temporal_tokens
 
-        if temporal_tokens:
-            self.seq_len = (context_len + chunk_len) * grid * grid
-            self.patch = nn.Linear(latent_ch, d_model)
-            self.time_pos = nn.Parameter(torch.zeros(1, context_len + chunk_len, 1, d_model))
-            self.space_pos = nn.Parameter(torch.zeros(1, 1, grid * grid, d_model))
-            self.segment = nn.Parameter(torch.zeros(2, d_model))
-            nn.init.normal_(self.time_pos, std=0.02)
-            nn.init.normal_(self.space_pos, std=0.02)
-            nn.init.normal_(self.segment, std=0.02)
-        else:
-            self.seq_len = chunk_len * grid * grid
-            self.in_ch = (context_len + 1) * latent_ch
-            self.patch = nn.Linear(self.in_ch, d_model)
-            self.pos_emb = nn.Parameter(torch.zeros(1, self.seq_len, d_model))
+        self.seq_len = (context_len + chunk_len) * grid * grid
+        self.patch = nn.Linear(latent_ch, d_model)
+        self.time_pos = nn.Parameter(torch.zeros(1, context_len + chunk_len, 1, d_model))
+        self.space_pos = nn.Parameter(torch.zeros(1, 1, grid * grid, d_model))
+        self.segment = nn.Parameter(torch.zeros(2, d_model))
+        nn.init.normal_(self.time_pos, std=0.02)
+        nn.init.normal_(self.space_pos, std=0.02)
+        nn.init.normal_(self.segment, std=0.02)
 
         self.t_embed = SinusoidalPositionEmbedding(d_model)
         self.t_mlp = nn.Sequential(
@@ -256,8 +248,6 @@ class DiffusionTransformer(nn.Module):
         self.ada_out = nn.Sequential(nn.SiLU(), nn.Linear(d_model, 2 * d_model))
         self.head = nn.Linear(d_model, latent_ch)
 
-        if not temporal_tokens:
-            nn.init.normal_(self.pos_emb, std=0.02)
         nn.init.zeros_(self.ada_out[-1].weight)
         nn.init.zeros_(self.ada_out[-1].bias)
         nn.init.zeros_(self.head.weight)
@@ -267,22 +257,14 @@ class DiffusionTransformer(nn.Module):
         B, K = x_noisy.shape[0], x_noisy.shape[1]
         gh = gw = self.grid
 
-        if self.temporal_tokens:
-            T = self.context_len
-            g2 = gh * gw
-            z = torch.cat([context_latents, x_noisy], dim=1)
-            z = z.permute(0, 1, 3, 4, 2).reshape(B, T + K, g2, self.latent_ch)
-            x = self.patch(z) + self.time_pos + self.space_pos
-            seg = torch.cat([self.segment[0].expand(T, g2, -1),
-                             self.segment[1].expand(K, g2, -1)], dim=0)
-            x = (x + seg).reshape(B, (T + K) * g2, -1)
-        else:
-            ctx = context_latents.reshape(B, self.context_len * self.latent_ch, gh, gw)
-            ctx = ctx.unsqueeze(1).expand(-1, K, -1, -1, -1)
-            x = torch.cat([ctx, x_noisy], dim=2)
-
-            x = x.permute(0, 1, 3, 4, 2).reshape(B, K * gh * gw, self.in_ch)
-            x = self.patch(x) + self.pos_emb[:, :x.shape[1]]
+        T = self.context_len
+        g2 = gh * gw
+        z = torch.cat([context_latents, x_noisy], dim=1)
+        z = z.permute(0, 1, 3, 4, 2).reshape(B, T + K, g2, self.latent_ch)
+        x = self.patch(z) + self.time_pos + self.space_pos
+        seg = torch.cat([self.segment[0].expand(T, g2, -1),
+                         self.segment[1].expand(K, g2, -1)], dim=0)
+        x = (x + seg).reshape(B, (T + K) * g2, -1)
 
         cond = self.t_mlp(self.t_embed(time_t))
         for block in self.blocks:
@@ -290,8 +272,7 @@ class DiffusionTransformer(nn.Module):
 
         shift, scale = self.ada_out(cond).chunk(2, dim=1)
         x = _modulate(self.norm_out(x), shift, scale)
-        if self.temporal_tokens:
-            x = x[:, -K * gh * gw:]
+        x = x[:, -K * gh * gw:]
         x = self.head(x)
 
         return x.reshape(B, K, gh, gw, self.latent_ch).permute(0, 1, 4, 2, 3)

@@ -28,11 +28,11 @@
     "eval_gif_len": 80,
     "dit_ema_decay": 0.999,
     "dit_context_noise": 0.0,
-    "dit_temporal": true,
     "compile": "on",
     "dit_precision": "bf16",
     "ae_precision": "bf16",
     "dec_precision": "bf16",
+    "dit_event_weights": "0.5,2,2,4",
     "dit_t_dist": "logit_normal",
     "dit_loss": "huber",
     "dit_huber_c": 1.0,
@@ -49,7 +49,7 @@
     "dec_rollout_k": 5,
     "dec_clean_frac": 0.5,
     "seed": "42",
-    "ae_checkpoint": "",
+    "ae_checkpoint": "/home/viktor/CV3-Project/runs/2026_07_10__04_41_22__bouncing_10k_b25_flow/autoencoder.pth",
     "dit_checkpoint": "",
     "dec_checkpoint": "",
     "datagen_name": "bouncing_10k_b25",
@@ -59,6 +59,5 @@
     "n_balls_max": 5,
     "speed_min": 3.0,
     "speed_max": 10.0,
-    "datagen_supersample": 4,
-    "dit_event_weights": "0.5,2,2,4"
+    "datagen_supersample": 4
 }

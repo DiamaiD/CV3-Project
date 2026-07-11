@@ -45,7 +45,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
-                          dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16", dit_temporal=False,
+                          dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16",
                           compile_mode="off", dit_event_weights="off",
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
                           dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
@@ -86,7 +86,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
           f"Beta: {ae_kl_weight} | LPIPS: {ae_lpips_weight}")
     print(f"DiT -> LR: {dyn_learning_rate} | WD: {dyn_weight_decay} | Batch: {dyn_batch_size} | "
           f"d_model: {dit_d_model} | layers: {dit_n_layers} | heads: {dit_n_heads} | "
-          f"context layout: {'temporal tokens' if dit_temporal else 'channel-squash'}")
+          f"context layout: temporal tokens")
 
     all_trajs = glob.glob(os.path.join(data_dir, "traj-*"))
     if not all_trajs:
@@ -150,7 +150,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     dit = DiffusionTransformer(latent_ch=latent_ch, context_len=context_len, grid=grid,
                                chunk_len=chunk_len, d_model=dit_d_model, n_layers=dit_n_layers,
                                n_heads=dit_n_heads, latent_scale=latent_scale,
-                               temporal_tokens=dit_temporal).to(device)
+                               ).to(device)
     if dit_loaded:
         dit.load_state_dict(torch.load(dit_checkpoint, map_location=device, weights_only=True))
         print(f"Loaded DiT from {dit_checkpoint} -- skipping Phase 2.")
@@ -258,7 +258,6 @@ if __name__ == "__main__":
     parser.add_argument("--dit_loss", choices=["mse", "huber"], default="mse", help="DiT velocity loss. mse = standard flow-matching L2 (regression to the conditional mean velocity). huber = pseudo-Huber sqrt(err^2+c^2)-c, whose per-element gradient saturates for large errors, so an outlier sample can't produce an unbounded gradient -- curbs precision-induced spikes at the source.")
     parser.add_argument("--dit_huber_c", type=float, default=1.0, help="Pseudo-Huber transition constant c (only used when --dit_loss huber). Errors >> c behave like L1, << c like L2. Velocity targets have per-element std ~1.4 in the normalized latent space, so c~1.0 balances robustness against fidelity; smaller c = more robust but further from L2's optimum.")
     parser.add_argument("--dit_fp32", action="store_true", help="Legacy alias for --dit_precision fp32 (takes precedence when set).")
-    parser.add_argument("--dit_temporal", action="store_true", help="Give the DiT time as its OWN token axis: every (frame, cell) of context + chunk becomes a token with factorized time+space positional embeddings, instead of squashing context frames into channels. ~(T+K)/K x more tokens, so proportionally slower per step. dit.pth checkpoints are NOT interchangeable between the two layouts.")
     parser.add_argument("--compile", choices=["off", "on"], default="off", help="torch.compile (Inductor) for all training phases. Falls back to eager if compilation fails; checkpoints are unaffected either way.")
     parser.add_argument("--ae_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 1 (VAE) compute precision (autocast; fp16 adds gradient scaling).")
     parser.add_argument("--dec_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 3 (decoder) compute precision (autocast; fp16 adds gradient scaling).")
@@ -300,7 +299,7 @@ if __name__ == "__main__":
         ae_grad_clip=args.ae_grad_clip,
         dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay,
         dit_grad_clip=args.dit_grad_clip, dit_ema_decay=args.dit_ema_decay,
-        dit_precision=("fp32" if args.dit_fp32 else args.dit_precision), dit_temporal=args.dit_temporal,
+        dit_precision=("fp32" if args.dit_fp32 else args.dit_precision),
         dit_event_weights=args.dit_event_weights,
         dit_t_dist=args.dit_t_dist, dit_loss=args.dit_loss, dit_huber_c=args.dit_huber_c,
         compile_mode=args.compile,

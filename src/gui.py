@@ -199,9 +199,6 @@ class TrainingGUI(ctk.CTk):
         self.dit_clip_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_clip_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
 
-        self.temporal_check = ctk.CTkCheckBox(self.dyn_frame, text="Temporal Tokens", font=self.bold_font)
-        self.temporal_check.grid(row=3, column=6, columnspan=2, padx=10, pady=10, sticky="w")
-
         self.precision_label = ctk.CTkLabel(self.dyn_frame, text="Precision:", font=self.bold_font)
         self.precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
         self.precision_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
@@ -543,7 +540,6 @@ class TrainingGUI(ctk.CTk):
                 self.eval_gif_len_entry.delete(0, "end"); self.eval_gif_len_entry.insert(0, str(c.get("eval_gif_len", 40)))
                 self.ema_decay_entry.delete(0, "end"); self.ema_decay_entry.insert(0, str(c.get("dit_ema_decay", 0.999)))
                 self.ctx_noise_entry.delete(0, "end"); self.ctx_noise_entry.insert(0, str(c.get("dit_context_noise", 0.0)))
-                self.temporal_check.select() if c.get("dit_temporal", False) else self.temporal_check.deselect()
                 _cm = str(c.get("compile", c.get("dit_compile", "off")))
                 self.compile_menu.set("off" if _cm in ("off", "") else "on")
                 self.precision_menu.set(c.get("dit_precision", "bf16"))
@@ -610,7 +606,6 @@ class TrainingGUI(ctk.CTk):
             self.eval_gif_len_entry.insert(0, "40")
             self.ema_decay_entry.insert(0, "0.999")
             self.ctx_noise_entry.insert(0, "0.0")
-            self.temporal_check.deselect()
             self.compile_menu.set("off")
             self.precision_menu.set("bf16")
             self.ae_precision_menu.set("bf16")
@@ -671,7 +666,6 @@ class TrainingGUI(ctk.CTk):
                 "eval_gif_len": int(self.eval_gif_len_entry.get()),
                 "dit_ema_decay": float(self.ema_decay_entry.get()),
                 "dit_context_noise": float(self.ctx_noise_entry.get()),
-                "dit_temporal": bool(self.temporal_check.get()),
                 "compile": self.compile_menu.get(),
                 "dit_precision": self.precision_menu.get(),
                 "ae_precision": self.ae_precision_menu.get(),
@@ -751,7 +745,6 @@ class TrainingGUI(ctk.CTk):
             eval_gif_len=c.get('eval_gif_len', 40),
             dit_ema_decay=c.get('dit_ema_decay', 0.999),
             dit_context_noise=c.get('dit_context_noise', 0.0),
-            dit_temporal=c.get('dit_temporal', False),
             compile_mode=c.get('compile', "off"),
             dit_precision=c.get('dit_precision', "bf16"),
             ae_precision=c.get('ae_precision', "bf16"),
