@@ -4,10 +4,14 @@ os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.expanduser("~/.cache/to
 
 import argparse
 import json
+import logging
 import torch
 import random
 import numpy as np
 import glob
+
+logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
 
 from src.dataset import FrameCache, CachedLoader
 from src.models import CNNVAE, DiffusionTransformer
