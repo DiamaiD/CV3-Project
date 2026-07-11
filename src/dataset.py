@@ -48,11 +48,12 @@ class FrameCache:
         ranges = None
         if disk_cache_path and os.path.exists(disk_cache_path):
             try:
-                blob = torch.load(disk_cache_path, map_location="cpu", weights_only=True)
+                blob = torch.load(disk_cache_path, map_location="cpu", weights_only=True, mmap=True)
                 if blob.get("sig") == sig:
                     frames = blob["frames"]
                     ranges = blob["ranges"]
-                    print(f"[Cache] Loaded {frames.shape[0]} frames from {disk_cache_path}.")
+                    print(f"[Cache] Memory-mapped {frames.shape[0]} frames from {disk_cache_path} "
+                          f"(paged from disk on demand, not resident).")
                 else:
                     print(f"[Cache] {disk_cache_path} is stale (dataset changed) -- rebuilding.")
             except Exception as e:
@@ -65,6 +66,10 @@ class FrameCache:
                     torch.save({"frames": frames, "ranges": ranges, "sig": sig}, disk_cache_path)
                     print(f"[Cache] Saved frame cache to {disk_cache_path} "
                           f"({frames.shape[0]} frames, {frames.numel() / 1e9:.2f} GB).")
+                    del frames
+                    blob = torch.load(disk_cache_path, map_location="cpu", weights_only=True, mmap=True)
+                    frames, ranges = blob["frames"], blob["ranges"]
+                    print("[Cache] Re-opened as memory-map; decoded tensor released from RAM.")
                 except Exception as e:
                     print(f"[Cache] Could not save cache to {disk_cache_path}: {e}")
 
@@ -74,19 +79,23 @@ class FrameCache:
 
     @staticmethod
     def _decode(listing):
-        chunks, ranges, start = [], {}, 0
+        ranges, start = {}, 0
         total = sum(len(p) for p in listing.values())
         print(f"[Cache] Decoding {total} frames into memory (one-time)...")
+        frames = None
         for name in sorted(listing.keys()):
             paths = listing[name]
             if not paths:
                 continue
             arr = np.stack([np.asarray(Image.open(p).convert("RGB")) for p in paths])
-            t = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
-            chunks.append(t)
+            t = torch.from_numpy(arr).permute(0, 3, 1, 2)
+            if frames is None:
+                frames = torch.empty((total, *t.shape[1:]), dtype=t.dtype)
+            frames[start:start + t.shape[0]] = t
             ranges[name] = (start, t.shape[0])
             start += t.shape[0]
-        frames = torch.cat(chunks, dim=0)
+        if start != frames.shape[0]:
+            frames = frames[:start].contiguous()
         return frames, ranges
 
     def build_windows(self, traj_dirs, context_len, horizon):
