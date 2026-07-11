@@ -177,18 +177,52 @@ def main():
           + (f" | {n_lost} trajs dropped (track loss)" if n_lost else ""))
 
     print(f"\nSecond-difference gravity fit (true: g {GRAVITY}, drag {AIR_DRAG_COEFF}):")
+    S_all = {"gt_npy": np.concatenate(S_gt) if S_gt else np.empty((0, 6)),
+             "extractor_real": np.concatenate(S_real) if S_real else np.empty((0, 6)),
+             "model_rollout": np.concatenate(S_model) if S_model else np.empty((0, 6))}
     results = {"run": args.run, "n_traj": len(test_trajs), "rollout_steps": args.steps,
                "true_g": GRAVITY, "true_drag": AIR_DRAG_COEFF,
-               "gt_npy": summarize("GT positions.npy", np.concatenate(S_gt) if S_gt else np.empty((0, 6)), seg_gt, len(test_trajs)),
-               "extractor_real": summarize("extractor on real", np.concatenate(S_real) if S_real else np.empty((0, 6)), seg_real, len(test_trajs)),
-               "model_rollout": summarize("MODEL rollout", np.concatenate(S_model) if S_model else np.empty((0, 6)), seg_model, len(test_trajs) - n_lost)}
+               "gt_npy": summarize("GT positions.npy", S_all["gt_npy"], seg_gt, len(test_trajs)),
+               "extractor_real": summarize("extractor on real", S_all["extractor_real"], seg_real, len(test_trajs)),
+               "model_rollout": summarize("MODEL rollout", S_all["model_rollout"], seg_model, len(test_trajs) - n_lost)}
 
     out_dir = os.path.join(args.run, "experiments")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, "gravity.json")
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"Saved to {out}")
+    plot_dir = os.path.join(out_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    make_plots(S_all, results, plot_dir)
+    print(f"Saved to {out} + plots/")
+
+
+def make_plots(S_all, results, plot_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    bins = np.linspace(-1.0, 0.0, 80)
+    styles = [("gt_npy", "ground-truth states", "#374151"),
+              ("extractor_real", "extractor on real frames", "#0b8fa8"),
+              ("model_rollout", "MODEL rollouts", "#c2410c")]
+    for key, label, color in styles:
+        S = S_all[key]
+        if not len(S):
+            continue
+        r = results[key]
+        ax.hist(np.clip(S[:, 1], -1, 0), bins=bins, density=True, histtype="step",
+                lw=2, color=color, label=f"{label}  (median {r['g_median_d2y']:+.4f})")
+    ax.axvline(GRAVITY, color="black", lw=1.2, ls="--", label="true g = -0.5")
+    ax.set_xlabel("per-frame vertical acceleration  d²y  [px/frame²]")
+    ax.set_ylabel("density")
+    ax.set_title("Gravity read out of free flight: second differences of ball height", fontsize=11)
+    ax.legend(frameon=False, fontsize=9)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "gravity_hist.png"), dpi=140)
+    plt.close(fig)
 
 
 if __name__ == "__main__":

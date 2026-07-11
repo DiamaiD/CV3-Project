@@ -237,21 +237,25 @@ def analyze(pos, valid, radius, mats, t_min=0):
     return mom_rows, wall_rows
 
 
+def momentum_rel(mom_rows, dens, cross_only=False):
+    rel = []
+    for ev in mom_rows:
+        if cross_only and ev["mi_mat"] == ev["mj_mat"]:
+            continue
+        mi = np.pi * ev["ri"] ** 2 * dens[ev["mi_mat"]]
+        mj = np.pi * ev["rj"] ** 2 * dens[ev["mj_mat"]]
+        dP = mi * np.array(ev["dvi"]) + mj * np.array(ev["dvj"])
+        J = 0.5 * (mi * np.linalg.norm(ev["dvi"]) + mj * np.linalg.norm(ev["dvj"]))
+        if J < 1e-6:
+            continue
+        rel.append(np.linalg.norm(dP) / J)
+    return np.array(rel)
+
+
 def momentum_stats(mom_rows, cross_only=False):
     out = {}
     for name, dens in MASS_MODELS.items():
-        rel = []
-        for ev in mom_rows:
-            if cross_only and ev["mi_mat"] == ev["mj_mat"]:
-                continue
-            mi = np.pi * ev["ri"] ** 2 * dens[ev["mi_mat"]]
-            mj = np.pi * ev["rj"] ** 2 * dens[ev["mj_mat"]]
-            dP = mi * np.array(ev["dvi"]) + mj * np.array(ev["dvj"])
-            J = 0.5 * (mi * np.linalg.norm(ev["dvi"]) + mj * np.linalg.norm(ev["dvj"]))
-            if J < 1e-6:
-                continue
-            rel.append(np.linalg.norm(dP) / J)
-        rel = np.array(rel)
+        rel = momentum_rel(mom_rows, dens, cross_only)
         out[name] = {"n": int(rel.size), "median": float(np.median(rel)),
                      "p90": float(np.percentile(rel, 90))} if rel.size else None
     return out
@@ -374,7 +378,86 @@ def main():
     out = os.path.join(out_dir, "collisions.json")
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\nSaved to {out}")
+    plot_dir = os.path.join(out_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    make_plots(acc, plot_dir)
+    print(f"\nSaved to {out} + plots/")
+
+
+MAT_COLORS = {"Superball": "#dc2626", "Rubber": "#2563eb",
+              "Steel": "#6b7280", "Sponge": "#16a34a"}
+
+
+def make_plots(acc, plot_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    mom_rows, wall_rows = acc["model"]
+    mom_gt = acc["gt"][0]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6))
+    ax = axes[0]
+    for m in MATERIALS:
+        rows = [r for r in wall_rows if r["mat"] == m]
+        if not rows:
+            continue
+        for key, marker, label in (("rest", "o", "restitution"), ("fric", "s", "friction")):
+            vals = np.array([r[key] for r in rows])
+            true = MATERIALS[m]["restitution" if key == "rest" else "friction"]
+            med = np.median(vals)
+            q1, q3 = np.percentile(vals, [25, 75])
+            ax.errorbar(true, med, yerr=[[med - q1], [q3 - med]], fmt=marker, ms=8,
+                        color=MAT_COLORS[m], capsize=3,
+                        markeredgecolor="white", markeredgewidth=0.8)
+    bb = {}
+    for ev in mom_rows:
+        bb.setdefault(ev["e_true"], []).append(ev["e_meas"])
+    for et, vals in bb.items():
+        med = np.median(vals)
+        ax.plot(et, med, "D", ms=7, color="#7c3aed", markeredgecolor="white",
+                markeredgewidth=0.8)
+    ax.plot([0, 1.05], [0, 1.05], color="gray", lw=1, ls="--")
+    ax.set_xlim(0.1, 1.05)
+    ax.set_ylim(0.1, 1.05)
+    ax.set_xlabel("true constant")
+    ax.set_ylabel("measured from model rollouts (median, IQR)")
+    ax.set_title("Material constants read out of generated video", fontsize=10)
+    handles = [plt.Line2D([], [], color=MAT_COLORS[m], marker="o", ls="", label=m)
+               for m in MATERIALS]
+    handles += [plt.Line2D([], [], color="gray", marker="o", ls="", label="wall restitution"),
+                plt.Line2D([], [], color="gray", marker="s", ls="", label="wall friction"),
+                plt.Line2D([], [], color="#7c3aed", marker="D", ls="", label="ball-ball e (min rule)")]
+    ax.legend(handles=handles, frameon=False, fontsize=8, loc="upper left")
+    ax.grid(alpha=0.25)
+
+    ax = axes[1]
+    labels, data, colors = [], [], []
+    for name in MASS_MODELS:
+        for rows, src, alpha in ((mom_gt, "sim", 0.45), (mom_rows, "model", 0.9)):
+            rel = momentum_rel(rows, MASS_MODELS[name], cross_only=True)
+            if rel.size:
+                labels.append(f"{name}\n({src})")
+                data.append(rel)
+                colors.append({"true": "#0b8fa8", "uniform": "#d97706",
+                               "shuffled": "#dc2626"}[name])
+    bp = ax.boxplot(data, tick_labels=labels, showfliers=False, patch_artist=True,
+                    medianprops={"color": "black"})
+    for patch, c, lab in zip(bp["boxes"], colors, labels):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.5 if "(sim)" in lab else 0.85)
+    for d, x in zip(data, range(1, len(data) + 1)):
+        ax.scatter(np.full(len(d), x) + np.random.uniform(-0.08, 0.08, len(d)),
+                   d, s=14, color="black", alpha=0.5, zorder=3)
+    ax.set_yscale("log")
+    ax.set_ylabel("|momentum change| / impulse exchanged")
+    ax.set_title("Cross-material momentum conservation by assumed mass model", fontsize=10)
+    ax.grid(alpha=0.25, axis="y")
+
+    fig.suptitle("Collision physics from model rollouts", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "collision_constants.png"), dpi=140)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
