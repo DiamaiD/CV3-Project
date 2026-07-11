@@ -286,8 +286,9 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         try:
             from torch import _dynamo
             _dynamo.config.suppress_errors = True
-            fwd = torch.compile(model, dynamic=False)
-            print("[FM] torch.compile ON (Inductor); the first epoch runs slow while graphs build.")
+            fwd = torch.compile(model, dynamic=False, mode="max-autotune")
+            print("[FM] torch.compile ON (Inductor, max-autotune); the first epoch runs slow while "
+                  "kernels autotune (cached across runs).")
         except Exception as e:
             fwd = model
             print(f"[FM] torch.compile unavailable ({e}) -- training eager.")
