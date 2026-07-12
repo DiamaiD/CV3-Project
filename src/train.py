@@ -7,15 +7,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05):
+def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0):
     warmup_steps = max(1, int(total_steps * warmup_frac))
     decay_steps = max(1, total_steps - warmup_steps)
+    min_factor = min(max(min_factor, 0.0), 1.0)
 
     def lr_factor(step):
         if step < warmup_steps:
             return 0.01 + (1.0 - 0.01) * (step / warmup_steps)
         progress = (step - warmup_steps) / decay_steps
-        return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return max(min_factor, 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0))))
 
     return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
@@ -250,8 +251,8 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
 
 
 def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
-                        weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999, context_noise=0.0,
-                        precision="bf16", compile_mode="off",
+                        min_lr=1e-6, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
+                        context_noise=0.0, precision="bf16", compile_mode="off",
                         t_dist="logit_normal", loss_type="mse", huber_c=1.0, device="cuda"):
     print("--- Phase 2: Training Flow Matching DiT (chunk prediction) ---")
     model.to(device)
@@ -260,7 +261,11 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
     except (RuntimeError, TypeError, ValueError):
         optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     total_steps = epochs * len(train_loader)
-    scheduler = build_warmup_cosine(optimizer, total_steps)
+    min_factor = min_lr / learning_rate if learning_rate > 0 else 0.0
+    scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=min_factor)
+    if min_lr > 0:
+        p_hit = math.acos(2 * min(min_factor, 1.0) - 1) / math.pi
+        print(f"LR floor: cosine flatlines at {min_lr:.1e} (reached ~{100 * p_hit:.0f}% through the decay)")
 
     batch_size = getattr(train_loader, "batch_size", 0)
     token_rows = batch_size * getattr(model, "seq_len", 0)

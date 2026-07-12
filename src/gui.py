@@ -199,6 +199,11 @@ class TrainingGUI(ctk.CTk):
         self.dit_clip_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_clip_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
 
+        self.dit_min_lr_label = ctk.CTkLabel(self.dyn_frame, text="Min LR:", font=self.bold_font)
+        self.dit_min_lr_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
+        self.dit_min_lr_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_min_lr_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
+
         self.precision_label = ctk.CTkLabel(self.dyn_frame, text="Precision:", font=self.bold_font)
         self.precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
         self.precision_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
@@ -515,6 +520,7 @@ class TrainingGUI(ctk.CTk):
                 self.ctx_entry.delete(0, "end"); self.ctx_entry.insert(0, str(c.get("context_len", 5)))
                 self.ae_lr_entry.delete(0, "end"); self.ae_lr_entry.insert(0, str(c.get("ae_learning_rate", 0.0005)))
                 self.dyn_lr_entry.delete(0, "end"); self.dyn_lr_entry.insert(0, str(c.get("dyn_learning_rate", 0.0005)))
+                self.dit_min_lr_entry.delete(0, "end"); self.dit_min_lr_entry.insert(0, str(c.get("dit_min_lr", 1e-06)))
                 self.ae_wd_entry.delete(0, "end"); self.ae_wd_entry.insert(0, str(c.get("ae_weight_decay", 0.001)))
                 self.dyn_wd_entry.delete(0, "end"); self.dyn_wd_entry.insert(0, str(c.get("dyn_weight_decay", 0.001)))
                 self.ae_batch_entry.delete(0, "end"); self.ae_batch_entry.insert(0, str(c.get("ae_batch_size", 32)))
@@ -641,6 +647,7 @@ class TrainingGUI(ctk.CTk):
                 "context_len": int(self.ctx_entry.get()),
                 "ae_learning_rate": float(self.ae_lr_entry.get()),
                 "dyn_learning_rate": float(self.dyn_lr_entry.get()),
+                "dit_min_lr": float(self.dit_min_lr_entry.get()),
                 "ae_weight_decay": float(self.ae_wd_entry.get()),
                 "dyn_weight_decay": float(self.dyn_wd_entry.get()),
                 "ae_batch_size": int(self.ae_batch_entry.get()),
@@ -730,7 +737,8 @@ class TrainingGUI(ctk.CTk):
             ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
             ae_kl_weight=c.get('ae_kl_weight', 0.005), ae_lpips_weight=c.get('ae_lpips_weight', 0.0),
             ae_lpips_net=c.get('ae_lpips_net', 'alex'), dec_lpips_net=c.get('dec_lpips_net', 'alex'),
-            dyn_learning_rate=c['dyn_learning_rate'], dyn_weight_decay=c['dyn_weight_decay'],
+            dyn_learning_rate=c['dyn_learning_rate'], dit_min_lr=c.get('dit_min_lr', 1e-6),
+            dyn_weight_decay=c['dyn_weight_decay'],
             eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
             dit_checkpoint=c.get('dit_checkpoint', ""),

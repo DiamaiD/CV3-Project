@@ -48,7 +48,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
-                          dyn_learning_rate=3e-4, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
+                          dyn_learning_rate=3e-4, dit_min_lr=1e-6, dyn_weight_decay=1e-4, dit_grad_clip=3.0,
                           dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16",
                           compile_mode="off", dit_event_weights="off",
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
@@ -178,6 +178,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         dit = train_flow_matching(dit, fm_train,
                                   latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
                                   epochs=dyn_epochs, learning_rate=dyn_learning_rate,
+                                  min_lr=dit_min_lr,
                                   weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
                                   ema_decay=dit_ema_decay, context_noise=dit_context_noise,
                                   precision=dit_precision,
@@ -253,6 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--latent_grid", type=int, default=8, help="VAE latent spatial size (8 -> 8x8, 16 -> 16x16). 16 makes motion more spatially local for the DiT at 4x token/cache cost. Requires retraining the VAE (8x8 checkpoints are incompatible).")
     parser.add_argument("--latent_ch", type=int, default=32, help="VAE latent channels per grid cell. More channels raise the reconstruction ceiling and give the DiT a richer per-cell code, at linearly more latent-cache size (does NOT change DiT token count -- that's chunk_len x grid^2). Requires retraining the VAE (checkpoints with a different channel count are incompatible); the DiT adapts automatically from the cache shape.")
     parser.add_argument("--dyn_learning_rate", type=float, default=3e-4)
+    parser.add_argument("--dit_min_lr", type=float, default=1e-6, help="Phase 2 LR floor: the cosine schedule decays normally until it reaches this LR, then flatlines (0 = decay to zero, old behavior). Measured on 20k runs: below ~1e-6 val loss stops improving and the train/val gap keeps widening -- the tail of the schedule only overfits.")
     parser.add_argument("--dyn_weight_decay", type=float, default=1e-4)
     parser.add_argument("--dit_grad_clip", type=float, default=3.0, help="Max global grad norm for the DiT (clipped each step). Safety net against loss-spike NaN divergence; the logged GradNorm shows whether it's biting. Set ~2-3x above the steady-state norm (which rode 1.2-1.4 late in training, so 1.0 was clipping healthy steps).")
     parser.add_argument("--dit_ema_decay", type=float, default=0.999, help="Weight-EMA decay for the DiT (0 = off). Eval + saved checkpoint use the averaged weights. Standard diffusion/flow trick, usually worth a few tenths of a dB.")
@@ -301,7 +303,8 @@ if __name__ == "__main__":
         ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
         ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
         ae_grad_clip=args.ae_grad_clip,
-        dyn_learning_rate=args.dyn_learning_rate, dyn_weight_decay=args.dyn_weight_decay,
+        dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
+        dyn_weight_decay=args.dyn_weight_decay,
         dit_grad_clip=args.dit_grad_clip, dit_ema_decay=args.dit_ema_decay,
         dit_precision=("fp32" if args.dit_fp32 else args.dit_precision),
         dit_event_weights=args.dit_event_weights,
