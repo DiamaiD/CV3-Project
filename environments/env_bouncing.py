@@ -87,14 +87,14 @@ def _resolve_ball_collisions(balls):
 def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_frames=100,
                            width=WIDTH, height=HEIGHT, n_balls_min=1, n_balls_max=5,
                            speed_min=3.0, speed_max=8.0, n_substeps=4, supersample=1,
-                           progress_cb=None):
+                           start_idx=0, progress_cb=None):
     ss = max(1, int(supersample))
     os.makedirs(data_dir, exist_ok=True)
     report_every = max(1, n_trajectories // 100)
     dt = 1.0 / n_substeps
 
     for i in tqdm(range(n_trajectories), desc="Generating RGB Physics Envs"):
-        traj_dir = os.path.join(data_dir, f'traj-{i}')
+        traj_dir = os.path.join(data_dir, f'traj-{start_idx + i}')
         os.makedirs(traj_dir, exist_ok=True)
 
         n_balls = np.random.randint(n_balls_min, n_balls_max + 1)
