@@ -18,27 +18,30 @@ _SUBPIX = 1 << SUBPIX_BITS
 REST_VELOCITY = abs(GRAVITY)
 
 
-def _make_ball(width, height, speed_min, speed_max):
+def _make_ball(width, height, speed_min, speed_max, y_frac_min=0.3, y_frac_max=1.0):
     mat_name = np.random.choice(list(MATERIALS.keys()))
     mat = MATERIALS[mat_name]
     radius = np.random.randint(5, 9)
     speed = np.random.uniform(speed_min, speed_max)
+    y_lo = max(radius, int(y_frac_min * height))
+    y_hi = max(y_lo + 1, min(height - radius, int(y_frac_max * height)))
     return {
         "mat": mat,
         "radius": radius,
         "mass": (np.pi * radius ** 2) * mat["density"],
         "x": float(np.random.randint(radius, width - radius)),
-        "y": float(np.random.randint(int(0.3 * height), height - radius)),
+        "y": float(np.random.randint(y_lo, y_hi)),
         "vx": np.random.randn() * speed,
         "vy": np.random.randn() * speed,
     }
 
 
-def _spawn_balls(n_balls, width, height, speed_min, speed_max, max_tries=100):
+def _spawn_balls(n_balls, width, height, speed_min, speed_max, max_tries=100,
+                 y_frac_min=0.3, y_frac_max=1.0):
     balls = []
     for _ in range(n_balls):
         for _ in range(max_tries):
-            cand = _make_ball(width, height, speed_min, speed_max)
+            cand = _make_ball(width, height, speed_min, speed_max, y_frac_min, y_frac_max)
             ok = True
             for b in balls:
                 min_dist = cand["radius"] + b["radius"]
@@ -87,7 +90,7 @@ def _resolve_ball_collisions(balls):
 def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_frames=100,
                            width=WIDTH, height=HEIGHT, n_balls_min=1, n_balls_max=5,
                            speed_min=3.0, speed_max=8.0, n_substeps=4, supersample=1,
-                           start_idx=0, progress_cb=None):
+                           start_idx=0, y_frac_min=0.3, y_frac_max=1.0, progress_cb=None):
     ss = max(1, int(supersample))
     os.makedirs(data_dir, exist_ok=True)
     report_every = max(1, n_trajectories // 100)
@@ -98,7 +101,8 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
         os.makedirs(traj_dir, exist_ok=True)
 
         n_balls = np.random.randint(n_balls_min, n_balls_max + 1)
-        balls = _spawn_balls(n_balls, width, height, speed_min, speed_max)
+        balls = _spawn_balls(n_balls, width, height, speed_min, speed_max,
+                             y_frac_min=y_frac_min, y_frac_max=y_frac_max)
 
         positions, velocities = [], []
 
