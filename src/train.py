@@ -7,8 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0):
-    warmup_steps = max(1, int(total_steps * warmup_frac))
+def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0, warmup_steps=None):
+    if warmup_steps is None:
+        warmup_steps = max(1, int(total_steps * warmup_frac))
+    warmup_steps = max(0, min(int(warmup_steps), total_steps - 1))
     decay_steps = max(1, total_steps - warmup_steps)
     min_factor = min(max(min_factor, 0.0), 1.0)
 
@@ -252,7 +254,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
 
 
 def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
-                        min_lr=1e-6, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
+                        min_lr=1e-6, warmup_frac=0.05, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
                         context_noise=0.0, precision="bf16", compile_mode="off",
                         t_dist="logit_normal", loss_type="mse", huber_c=1.0, device="cuda"):
     print("--- Phase 2: Training Flow Matching DiT (chunk prediction) ---")
@@ -263,7 +265,12 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     total_steps = epochs * len(train_loader)
     min_factor = min_lr / learning_rate if learning_rate > 0 else 0.0
-    scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=min_factor)
+    warmup_frac = min(max(warmup_frac, 0.0), 1.0)
+    warmup_steps = int(round(total_steps * warmup_frac))
+    scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=min_factor, warmup_steps=warmup_steps)
+    print("LR warmup: off (cosine decay starts at full LR)" if warmup_steps == 0
+          else f"LR warmup: {warmup_frac:g} of the schedule ({warmup_steps} steps, "
+               f"{warmup_frac * epochs:.2g} epochs)")
     if min_lr > 0:
         print(f"LR floor: cosine anneals from {learning_rate:.1e} to {min_lr:.1e} over the full schedule "
               f"(reaches the floor at the final step)")
