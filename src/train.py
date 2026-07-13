@@ -16,7 +16,8 @@ def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0
         if step < warmup_steps:
             return 0.01 + (1.0 - 0.01) * (step / warmup_steps)
         progress = (step - warmup_steps) / decay_steps
-        return max(min_factor, 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0))))
+        cos = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return min_factor + (1.0 - min_factor) * cos
 
     return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
@@ -264,8 +265,8 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
     min_factor = min_lr / learning_rate if learning_rate > 0 else 0.0
     scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=min_factor)
     if min_lr > 0:
-        p_hit = math.acos(2 * min(min_factor, 1.0) - 1) / math.pi
-        print(f"LR floor: cosine flatlines at {min_lr:.1e} (reached ~{100 * p_hit:.0f}% through the decay)")
+        print(f"LR floor: cosine anneals from {learning_rate:.1e} to {min_lr:.1e} over the full schedule "
+              f"(reaches the floor at the final step)")
 
     batch_size = getattr(train_loader, "batch_size", 0)
     token_rows = batch_size * getattr(model, "seq_len", 0)
