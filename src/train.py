@@ -24,6 +24,31 @@ def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0
     return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
 
+def build_restart_cosine(optimizer, steps_1, lr_1, min_lr_1, steps_2, lr_2, min_lr_2, warmup_frac=0.05):
+    """Cosine anneal lr_1 -> min_lr_1 over steps_1 (linear warmup first), then a single warm
+    restart: jump to lr_2 and cosine down to min_lr_2 over steps_2. Weights and optimizer state
+    carry over; only the LR jumps. Factors are relative to lr_1 (the optimizer's base LR).
+    steps_2 == 0 reduces exactly to the single-schedule behavior of build_warmup_cosine."""
+    warmup_steps = max(0, min(int(round(steps_1 * warmup_frac)), steps_1 - 1))
+    decay_1 = max(1, steps_1 - warmup_steps)
+    m1 = min(max(min_lr_1 / lr_1 if lr_1 > 0 else 0.0, 0.0), 1.0)
+    r2 = lr_2 / lr_1 if lr_1 > 0 else 0.0
+    m2 = min(max(min_lr_2 / lr_2 if lr_2 > 0 else 0.0, 0.0), 1.0)
+
+    def lr_factor(step):
+        if step < warmup_steps:
+            return 0.01 + (1.0 - 0.01) * (step / warmup_steps)
+        if step < steps_1 or steps_2 <= 0:
+            progress = min((step - warmup_steps) / decay_1, 1.0)
+            cos = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return m1 + (1.0 - m1) * cos
+        progress = min((step - steps_1) / steps_2, 1.0)
+        cos = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return r2 * (m2 + (1.0 - m2) * cos)
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+
+
 @torch.no_grad()
 def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
     ae.eval()
@@ -254,7 +279,8 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
 
 
 def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
-                        min_lr=1e-6, warmup_frac=0.05, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
+                        min_lr=1e-6, warmup_frac=0.05, epochs_2=0, learning_rate_2=2e-4,
+                        min_lr_2=2e-6, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
                         context_noise=0.0, precision="bf16", compile_mode="off",
                         t_dist="logit_normal", loss_type="mse", huber_c=1.0, device="cuda"):
     print("--- Phase 2: Training Flow Matching DiT (chunk prediction) ---")
@@ -263,15 +289,23 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, fused=True)
     except (RuntimeError, TypeError, ValueError):
         optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    total_steps = epochs * len(train_loader)
-    min_factor = min_lr / learning_rate if learning_rate > 0 else 0.0
+    steps_per_epoch = len(train_loader)
+    epochs_2 = max(0, int(epochs_2))
+    total_epochs = epochs + epochs_2
     warmup_frac = min(max(warmup_frac, 0.0), 1.0)
-    warmup_steps = int(round(total_steps * warmup_frac))
-    scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=min_factor, warmup_steps=warmup_steps)
+    steps_1 = epochs * steps_per_epoch
+    warmup_steps = max(0, min(int(round(steps_1 * warmup_frac)), steps_1 - 1))
+    scheduler = build_restart_cosine(optimizer, steps_1, learning_rate, min_lr,
+                                     epochs_2 * steps_per_epoch, learning_rate_2, min_lr_2,
+                                     warmup_frac=warmup_frac)
     print("LR warmup: off (cosine decay starts at full LR)" if warmup_steps == 0
-          else f"LR warmup: {warmup_frac:g} of the schedule ({warmup_steps} steps, "
+          else f"LR warmup: {warmup_frac:g} of the first iteration ({warmup_steps} steps, "
                f"{warmup_frac * epochs:.2g} epochs)")
-    if min_lr > 0:
+    if epochs_2 > 0:
+        print(f"LR schedule: warm restart after epoch {epochs} -- iter 1: {learning_rate:.1e} -> "
+              f"{min_lr:.1e} over {epochs} ep, then iter 2: {learning_rate_2:.1e} -> {min_lr_2:.1e} "
+              f"over {epochs_2} ep (weights, optimizer state and EMA carry over)")
+    elif min_lr > 0:
         print(f"LR floor: cosine anneals from {learning_rate:.1e} to {min_lr:.1e} over the full schedule "
               f"(reaches the floor at the final step)")
 
@@ -343,7 +377,7 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
             loss = F.mse_loss(vp, vt)
         return loss
 
-    for epoch in range(epochs):
+    for epoch in range(total_epochs):
         start_time = time.time()
 
         model.train()
@@ -380,7 +414,7 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
         nb_tr, nb_val = max(len(train_loader) - n_overflow, 1), len(val_loader)
         epoch_time = time.time() - start_time
         skipped = f" | Skipped: {n_overflow} overflow" if n_overflow else ""
-        print(f"FM Epoch {epoch+1}/{epochs} | Time: {epoch_time:.2f}s | "
+        print(f"FM Epoch {epoch+1}/{total_epochs} | Time: {epoch_time:.2f}s | "
               f"LR: {scheduler.get_last_lr()[0]:.2e} | GradNorm: {tr_gnorm.item()/nb_tr:.3f} | "
               f"Train Loss: {tr_loss.item()/nb_tr:.6f} | Val Loss: {val_loss.item()/nb_val:.6f}{skipped}")
 

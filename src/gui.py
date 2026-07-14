@@ -209,6 +209,21 @@ class TrainingGUI(ctk.CTk):
         self.dit_warmup_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_warmup_entry.grid(row=5, column=5, padx=10, pady=10, sticky="w")
 
+        self.dyn_epochs2_label = ctk.CTkLabel(self.dyn_frame, text="Epochs 2:", font=self.bold_font)
+        self.dyn_epochs2_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.dyn_epochs2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_epochs2_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
+
+        self.dyn_lr2_label = ctk.CTkLabel(self.dyn_frame, text="LR 2:", font=self.bold_font)
+        self.dyn_lr2_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
+        self.dyn_lr2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_lr2_entry.grid(row=4, column=3, padx=10, pady=10, sticky="w")
+
+        self.dit_min_lr2_label = ctk.CTkLabel(self.dyn_frame, text="Min LR 2:", font=self.bold_font)
+        self.dit_min_lr2_label.grid(row=4, column=4, padx=10, pady=10, sticky="e")
+        self.dit_min_lr2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_min_lr2_entry.grid(row=4, column=5, padx=10, pady=10, sticky="w")
+
         self.precision_label = ctk.CTkLabel(self.dyn_frame, text="Precision:", font=self.bold_font)
         self.precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
         self.precision_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
@@ -527,6 +542,9 @@ class TrainingGUI(ctk.CTk):
                 self.dyn_lr_entry.delete(0, "end"); self.dyn_lr_entry.insert(0, str(c.get("dyn_learning_rate", 0.0005)))
                 self.dit_min_lr_entry.delete(0, "end"); self.dit_min_lr_entry.insert(0, str(c.get("dit_min_lr", 1e-06)))
                 self.dit_warmup_entry.delete(0, "end"); self.dit_warmup_entry.insert(0, str(c.get("dit_warmup_frac", 0.05)))
+                self.dyn_epochs2_entry.delete(0, "end"); self.dyn_epochs2_entry.insert(0, str(c.get("dyn_epochs_2", 0)))
+                self.dyn_lr2_entry.delete(0, "end"); self.dyn_lr2_entry.insert(0, str(c.get("dyn_learning_rate_2", 0.0002)))
+                self.dit_min_lr2_entry.delete(0, "end"); self.dit_min_lr2_entry.insert(0, str(c.get("dit_min_lr_2", 2e-06)))
                 self.ae_wd_entry.delete(0, "end"); self.ae_wd_entry.insert(0, str(c.get("ae_weight_decay", 0.001)))
                 self.dyn_wd_entry.delete(0, "end"); self.dyn_wd_entry.insert(0, str(c.get("dyn_weight_decay", 0.001)))
                 self.ae_batch_entry.delete(0, "end"); self.ae_batch_entry.insert(0, str(c.get("ae_batch_size", 32)))
@@ -655,6 +673,9 @@ class TrainingGUI(ctk.CTk):
                 "dyn_learning_rate": float(self.dyn_lr_entry.get()),
                 "dit_min_lr": float(self.dit_min_lr_entry.get()),
                 "dit_warmup_frac": float(self.dit_warmup_entry.get()),
+                "dyn_epochs_2": int(self.dyn_epochs2_entry.get()),
+                "dyn_learning_rate_2": float(self.dyn_lr2_entry.get()),
+                "dit_min_lr_2": float(self.dit_min_lr2_entry.get()),
                 "ae_weight_decay": float(self.ae_wd_entry.get()),
                 "dyn_weight_decay": float(self.dyn_wd_entry.get()),
                 "ae_batch_size": int(self.ae_batch_entry.get()),
@@ -746,6 +767,8 @@ class TrainingGUI(ctk.CTk):
             ae_lpips_net=c.get('ae_lpips_net', 'alex'), dec_lpips_net=c.get('dec_lpips_net', 'alex'),
             dyn_learning_rate=c['dyn_learning_rate'], dit_min_lr=c.get('dit_min_lr', 1e-6),
             dit_warmup_frac=c.get('dit_warmup_frac', 0.05),
+            dyn_epochs_2=c.get('dyn_epochs_2', 0), dyn_learning_rate_2=c.get('dyn_learning_rate_2', 2e-4),
+            dit_min_lr_2=c.get('dit_min_lr_2', 2e-6),
             dyn_weight_decay=c['dyn_weight_decay'],
             eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
