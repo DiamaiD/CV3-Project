@@ -5,8 +5,9 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from environments.env_bouncing import (_resolve_ball_collisions, GRAVITY, AIR_DRAG_COEFF,
-                                       WIDTH, HEIGHT, REST_VELOCITY, SUBPIX_BITS, _SUBPIX)
+from environments.env_bouncing import (_resolve_ball_collisions, _settle_contacts, GRAVITY,
+                                       AIR_DRAG_COEFF, WIDTH, HEIGHT, REST_VELOCITY,
+                                       SUBPIX_BITS, _SUBPIX)
 from experiments.extractor import MATERIALS
 
 
@@ -59,6 +60,8 @@ def step_frame(balls, n_substeps=4):
             if b["x"] + radius >= WIDTH:
                 b["x"], b["vx"] = WIDTH - radius, b["vx"] * -rest
                 b["vy"] *= fric
+
+        _settle_contacts(balls, WIDTH, HEIGHT)
     return bb_hit, wall_hit
 
 

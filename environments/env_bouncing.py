@@ -17,6 +17,11 @@ SUBPIX_BITS = 4
 _SUBPIX = 1 << SUBPIX_BITS
 REST_VELOCITY = abs(GRAVITY)
 
+# CV3_LEGACY_CONTACTS=1 reproduces the pre-2026-07-15 contact behavior (positional
+# correction skipped for resting/separating pairs -> interpenetrating piles).
+# Needed to bit-exactly re-simulate datasets/models from before the fix.
+LEGACY_CONTACTS = os.environ.get("CV3_LEGACY_CONTACTS", "0") == "1"
+
 
 def _make_ball(width, height, speed_min, speed_max, y_frac_min=0.3, y_frac_max=1.0):
     mat_name = np.random.choice(list(MATERIALS.keys()))
@@ -54,7 +59,105 @@ def _spawn_balls(n_balls, width, height, speed_min, speed_max, max_tries=100,
     return balls
 
 
-def _resolve_ball_collisions(balls):
+def _wall_blocked(b, dx, dy, width, height):
+    """True if moving b along (dx, dy) is blocked by a wall it already touches."""
+    eps, r = 0.01, b["radius"]
+    return ((b["x"] - r <= eps and dx < -1e-9) or (b["x"] + r >= width - eps and dx > 1e-9)
+            or (b["y"] - r <= eps and dy < -1e-9) or (b["y"] + r >= height - eps and dy > 1e-9))
+
+
+def _separate_pair(a, b, nx, ny, overlap, width, height):
+    """Positional separation with wall-aware shares: a wall-pinned ball would be
+    clamped right back, so its partner takes the full displacement instead."""
+    a_blk = _wall_blocked(a, -nx, -ny, width, height)
+    b_blk = _wall_blocked(b, nx, ny, width, height)
+    total_mass = a["mass"] + b["mass"]
+    a_share = overlap * (b["mass"] / total_mass)
+    b_share = overlap * (a["mass"] / total_mass)
+    if a_blk and not b_blk:
+        a_share, b_share = 0.0, overlap
+    elif b_blk and not a_blk:
+        a_share, b_share = overlap, 0.0
+    a["x"] -= a_share * nx
+    a["y"] -= a_share * ny
+    b["x"] += b_share * nx
+    b["y"] += b_share * ny
+
+
+def _wall_project(b, width, height):
+    """Position-only wall clamp (no bounce physics) for relaxation passes."""
+    r = b["radius"]
+    if b["y"] - r < 0:
+        b["y"] = r
+    if b["y"] + r > height:
+        b["y"] = height - r
+    if b["x"] - r < 0:
+        b["x"] = r
+    if b["x"] + r > width:
+        b["x"] = width - r
+
+
+def _positional_pass(balls, width, height):
+    moved = False
+    for i in range(len(balls)):
+        for j in range(i + 1, len(balls)):
+            a, b = balls[i], balls[j]
+            dx, dy = b["x"] - a["x"], b["y"] - a["y"]
+            dist = np.hypot(dx, dy)
+            min_dist = a["radius"] + b["radius"]
+            if dist == 0 or dist >= min_dist - 1e-9:
+                continue
+            _separate_pair(a, b, dx / dist, dy / dist, min_dist - dist, width, height)
+            moved = True
+    if moved:
+        for b in balls:
+            _wall_project(b, width, height)
+    return moved
+
+
+def _settle_contacts(balls, width=WIDTH, height=HEIGHT, iters=8):
+    """Relax residual interpenetration in multi-contact piles (position only --
+    bounce physics has already been applied this substep)."""
+    if LEGACY_CONTACTS:
+        return
+    for _ in range(iters):
+        if not _positional_pass(balls, width, height):
+            break
+
+
+def _resolve_ball_collisions_legacy(balls):
+    for i in range(len(balls)):
+        for j in range(i + 1, len(balls)):
+            a, b = balls[i], balls[j]
+            dx, dy = b["x"] - a["x"], b["y"] - a["y"]
+            dist = np.hypot(dx, dy)
+            min_dist = a["radius"] + b["radius"]
+            if dist == 0 or dist >= min_dist:
+                continue
+            nx, ny = dx / dist, dy / dist
+            rvx, rvy = a["vx"] - b["vx"], a["vy"] - b["vy"]
+            vrel = rvx * nx + rvy * ny
+            if vrel <= 0:
+                continue
+            e = min(a["mat"]["restitution"], b["mat"]["restitution"])
+            imp = -(1 + e) * vrel / (1.0 / a["mass"] + 1.0 / b["mass"])
+            a["vx"] += (imp / a["mass"]) * nx
+            a["vy"] += (imp / a["mass"]) * ny
+            b["vx"] -= (imp / b["mass"]) * nx
+            b["vy"] -= (imp / b["mass"]) * ny
+            overlap = min_dist - dist
+            total_mass = a["mass"] + b["mass"]
+            a_share = overlap * (b["mass"] / total_mass)
+            b_share = overlap * (a["mass"] / total_mass)
+            a["x"] -= a_share * nx
+            a["y"] -= a_share * ny
+            b["x"] += b_share * nx
+            b["y"] += b_share * ny
+
+
+def _resolve_ball_collisions(balls, width=WIDTH, height=HEIGHT):
+    if LEGACY_CONTACTS:
+        return _resolve_ball_collisions_legacy(balls)
     for i in range(len(balls)):
         for j in range(i + 1, len(balls)):
             a, b = balls[i], balls[j]
@@ -67,24 +170,17 @@ def _resolve_ball_collisions(balls):
             nx, ny = dx / dist, dy / dist
             rvx, rvy = a["vx"] - b["vx"], a["vy"] - b["vy"]
             vrel = rvx * nx + rvy * ny
-            if vrel <= 0:
-                continue
+            if vrel > 0:
+                e = min(a["mat"]["restitution"], b["mat"]["restitution"])
+                imp = -(1 + e) * vrel / (1.0 / a["mass"] + 1.0 / b["mass"])
+                a["vx"] += (imp / a["mass"]) * nx
+                a["vy"] += (imp / a["mass"]) * ny
+                b["vx"] -= (imp / b["mass"]) * nx
+                b["vy"] -= (imp / b["mass"]) * ny
 
-            e = min(a["mat"]["restitution"], b["mat"]["restitution"])
-            imp = -(1 + e) * vrel / (1.0 / a["mass"] + 1.0 / b["mass"])
-            a["vx"] += (imp / a["mass"]) * nx
-            a["vy"] += (imp / a["mass"]) * ny
-            b["vx"] -= (imp / b["mass"]) * nx
-            b["vy"] -= (imp / b["mass"]) * ny
-
-            overlap = min_dist - dist
-            total_mass = a["mass"] + b["mass"]
-            a_share = overlap * (b["mass"] / total_mass)
-            b_share = overlap * (a["mass"] / total_mass)
-            a["x"] -= a_share * nx
-            a["y"] -= a_share * ny
-            b["x"] += b_share * nx
-            b["y"] += b_share * ny
+            # positional correction is applied regardless of approach speed --
+            # skipping it for resting/separating pairs left piles interpenetrated
+            _separate_pair(a, b, nx, ny, min_dist - dist, width, height)
 
 
 def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_frames=100,
@@ -130,7 +226,7 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
                     b["x"] += b["vx"] * dt
                     b["y"] += b["vy"] * dt
 
-                _resolve_ball_collisions(balls)
+                _resolve_ball_collisions(balls, width, height)
 
                 for b in balls:
                     radius = b["radius"]
@@ -150,6 +246,8 @@ def generate_bouncing_data(data_dir="data/bouncing", n_trajectories=5000, max_fr
                     if b["x"] + radius >= width:
                         b["x"], b["vx"] = width - radius, b["vx"] * -rest
                         b["vy"] *= fric
+
+                _settle_contacts(balls, width, height)
 
         np.save(os.path.join(traj_dir, "positions.npy"), np.array(positions))
         np.save(os.path.join(traj_dir, "velocities.npy"), np.array(velocities))
