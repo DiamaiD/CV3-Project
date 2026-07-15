@@ -266,7 +266,10 @@ def restitution_stats(mom_rows):
     for ev in mom_rows:
         groups.setdefault(round(ev["e_true"], 2), []).append(ev["e_meas"])
     return {str(k): {"n": len(v), "median": float(np.median(v)),
-                     "mad": float(np.median(np.abs(np.array(v) - np.median(v))))}
+                     "mad": float(np.median(np.abs(np.array(v) - np.median(v)))),
+                     "mean": float(np.mean(v)),
+                     "std": float(np.std(v, ddof=1)) if len(v) > 1 else 0.0,
+                     "values": [float(x) for x in v]}
             for k, v in sorted(groups.items())}
 
 
@@ -280,7 +283,12 @@ def wall_stats(wall_rows):
         fric = np.array([r["fric"] for r in rows])
         out[m] = {"n": len(rows),
                   "rest_median": float(np.median(rest)), "rest_true": MATERIALS[m]["restitution"],
-                  "fric_median": float(np.median(fric)), "fric_true": MATERIALS[m]["friction"]}
+                  "rest_mean": float(rest.mean()),
+                  "rest_std": float(rest.std(ddof=1)) if len(rows) > 1 else 0.0,
+                  "fric_median": float(np.median(fric)), "fric_true": MATERIALS[m]["friction"],
+                  "fric_mean": float(fric.mean()),
+                  "fric_std": float(fric.std(ddof=1)) if len(rows) > 1 else 0.0,
+                  "rest_values": [float(x) for x in rest], "fric_values": [float(x) for x in fric]}
     return out
 
 

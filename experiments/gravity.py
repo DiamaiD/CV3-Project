@@ -81,7 +81,11 @@ def fit_gravity(S, iters=3, k_mad=6.0):
         mad = np.median(np.abs(resid[keep] - med)) + 1e-9
         keep = np.abs(resid - med) < k_mad * mad
     resid = A @ sol - b
-    return float(sol[0]), float(sol[1]), float(np.sqrt((resid[keep] ** 2).mean())), float(keep.mean())
+    Ak, rk = A[keep], resid[keep]
+    dof = max(int(keep.sum()) - 2, 1)
+    cov = (float(rk @ rk) / dof) * np.linalg.inv(Ak.T @ Ak)
+    g_se, c_se = float(np.sqrt(cov[0, 0])), float(np.sqrt(cov[1, 1]))
+    return float(sol[0]), float(sol[1]), float(np.sqrt((rk ** 2).mean())), float(keep.mean()), g_se, c_se
 
 
 def summarize(name, S, n_seg, n_traj):
@@ -91,12 +95,15 @@ def summarize(name, S, n_seg, n_traj):
     g_med = float(np.median(S[:, 1]))
     g_mad = float(np.median(np.abs(S[:, 1] - g_med)))
     d2x_med = float(np.median(S[:, 0]))
-    g_fit, c_fit, rms, inlier = fit_gravity(S)
+    g_fit, c_fit, rms, inlier, g_se, c_se = fit_gravity(S)
     r = {"n_traj": n_traj, "n_segments": n_seg, "n_samples": int(len(S)),
-         "g_median_d2y": g_med, "g_mad": g_mad, "d2x_median": d2x_med,
-         "g_fit": g_fit, "drag_fit": c_fit, "fit_resid_rms": rms, "fit_inlier_frac": inlier}
-    print(f"{name:>18}: g_med {g_med:+.4f} (MAD {g_mad:.4f}) | joint fit g {g_fit:+.4f}, "
-          f"drag {c_fit:.4f} | d2x_med {d2x_med:+.5f} | resid {rms:.4f} "
+         "g_median_d2y": g_med, "g_mad": g_mad,
+         "g_mean_d2y": float(np.mean(S[:, 1])), "g_std_d2y": float(np.std(S[:, 1], ddof=1)),
+         "d2x_median": d2x_med,
+         "g_fit": g_fit, "drag_fit": c_fit, "g_fit_se": g_se, "drag_fit_se": c_se,
+         "fit_resid_rms": rms, "fit_inlier_frac": inlier}
+    print(f"{name:>18}: g_med {g_med:+.4f} (MAD {g_mad:.4f}) | joint fit g {g_fit:+.4f} (se {g_se:.4f}), "
+          f"drag {c_fit:.4f} (se {c_se:.4f}) | d2x_med {d2x_med:+.5f} | resid {rms:.4f} "
           f"(inliers {inlier:.1%}) | {len(S)} samples / {n_seg} segs / {n_traj} trajs")
     return r
 
