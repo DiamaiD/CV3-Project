@@ -47,7 +47,8 @@ def _parse_event_weights(s):
 def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
-                          ae_lpips_weight=0.0, ae_lpips_net="alex", ae_grad_clip=10.0, ae_precision="bf16",
+                          ae_lpips_weight=0.0, ae_lpips_net="alex", ae_focal_weight=0.0,
+                          ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dit_min_lr=1e-6, dit_warmup_frac=0.05,
                           dyn_epochs_2=0, dyn_learning_rate_2=2e-4, dit_min_lr_2=2e-6,
                           dyn_weight_decay=1e-4, dit_grad_clip=3.0,
@@ -128,6 +129,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
                                weight_decay=ae_weight_decay, kl_weight=ae_kl_weight,
                                lpips_weight=ae_lpips_weight, lpips_net=ae_lpips_net,
+                               focal_weight=ae_focal_weight,
                                grad_clip=ae_grad_clip, precision=ae_precision, compile_mode=compile_mode, device=device)
 
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
@@ -254,6 +256,7 @@ if __name__ == "__main__":
     parser.add_argument("--ae_kl_weight", type=float, default=0.005, help="VAE KL weight (beta). Lower if reconstructions blur / KL collapses; raise if the latent is barely regularized.")
     parser.add_argument("--ae_lpips_weight", type=float, default=0.0, help="Perceptual (LPIPS) loss weight on the VAE. 0 = off (pixel+KL only). ~1.0 makes latent L2 track perceptual quality, the key fix for the prediction-blur ceiling. Needs `pip install lpips`.")
     parser.add_argument("--ae_lpips_net", type=str, default="alex", choices=["alex", "vgg"], help="LPIPS backbone for Phase 1. alex is cheaper and historically gave the more PREDICTABLE latent (better DiT); vgg pushes recon sharper but traded predictability away in every run so far.")
+    parser.add_argument("--ae_focal_weight", type=float, default=0.0, help="Error-focused pixel weighting on the VAE recon loss (0 = off). Each pixel's squared error is upweighted by 1 + w*(err/mean_err), detached and scale-normalized by (1+w) so the recon/LPIPS balance stays fixed. Concentrates capacity on hard pixels (ball-ball contact regions carry ~8x the squared error of free flight).")
     parser.add_argument("--ae_grad_clip", type=float, default=10.0, help="Max global grad norm for the VAE (clipped each step). Safety net against the loss spikes a deeper LPIPS backbone (e.g. VGG) can trigger. The sum-reduced recon makes norms large, so this is loose; the logged GradNorm (pre-clip) shows the steady-state -- tighten toward ~2-3x it once observed.")
     parser.add_argument("--latent_grid", type=int, default=8, help="VAE latent spatial size (8 -> 8x8, 16 -> 16x16). 16 makes motion more spatially local for the DiT at 4x token/cache cost. Requires retraining the VAE (8x8 checkpoints are incompatible).")
     parser.add_argument("--latent_ch", type=int, default=32, help="VAE latent channels per grid cell. More channels raise the reconstruction ceiling and give the DiT a richer per-cell code, at linearly more latent-cache size (does NOT change DiT token count -- that's chunk_len x grid^2). Requires retraining the VAE (checkpoints with a different channel count are incompatible); the DiT adapts automatically from the cache shape.")
@@ -310,7 +313,7 @@ if __name__ == "__main__":
         ae_epochs=args.ae_epochs, dyn_epochs=args.dyn_epochs,
         ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
         ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
-        ae_grad_clip=args.ae_grad_clip,
+        ae_focal_weight=args.ae_focal_weight, ae_grad_clip=args.ae_grad_clip,
         dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
         dit_warmup_frac=args.dit_warmup_frac,
         dyn_epochs_2=args.dyn_epochs_2, dyn_learning_rate_2=args.dyn_learning_rate_2,

@@ -78,7 +78,18 @@ def main():
     import cv2
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ae, dit, cfg = load_run(args.run, device)
+    if os.path.exists(os.path.join(args.run, "dit.pth")):
+        ae, dit, cfg = load_run(args.run, device)
+    else:  # AE-only run (VAE screening)
+        from src.models import CNNVAE
+        with open(os.path.join(args.run, "run_config.json")) as f:
+            cfg = json.load(f)
+        ae = CNNVAE(latent_ch=cfg["latent_ch"], latent_grid=cfg["latent_grid"],
+                    enc_res_blocks=cfg["vae_enc_res_blocks"],
+                    dec_res_blocks=cfg["vae_dec_res_blocks"]).to(device)
+        ae.load_state_dict(torch.load(os.path.join(args.run, "autoencoder.pth"),
+                                      map_location=device, weights_only=True))
+        ae.eval()
     print(f"Latent analysis | AE from {args.run} | data {args.data}")
 
     import glob, random
@@ -145,7 +156,7 @@ def main():
     cx, cy = cell_centers()
     X_rows, T_dx, T_dy, T_dist, T_rad, T_mat, T_traj = [], [], [], [], [], [], []
     for ei, (fi, pos, radii, mats) in enumerate(entries):
-        feat = mus[fi].reshape(32, -1).T          # (64, 32)
+        feat = mus[fi].reshape(mus.shape[1], -1).T  # (cells, latent_ch)
         d = np.sqrt((cx.ravel()[:, None] - pos[None, :, 0]) ** 2
                     + (cy.ravel()[:, None] - pos[None, :, 1]) ** 2)
         nb = d.argmin(1)

@@ -179,7 +179,8 @@ def build_lpips(device, net="alex"):
 
 def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
                       weight_decay=1e-4, kl_weight=1.0, lpips_weight=0.0, lpips_net="alex",
-                      grad_clip=10.0, precision="bf16", compile_mode="off", device="cuda"):
+                      focal_weight=0.0, grad_clip=10.0, precision="bf16", compile_mode="off",
+                      device="cuda"):
     print(f"--- Phase 1: Training Autoencoder (VAE) ---")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -194,6 +195,8 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
     elif perceptual is not None:
         backbone = getattr(perceptual, "pnet_type", "?")
         print(f"[VAE] Perceptual loss ON: LPIPS-{backbone}, weight {lpips_weight}.")
+    if focal_weight > 0:
+        print(f"[VAE] Focal pixel weighting ON: {focal_weight} (error-proportional, scale-normalized).")
 
     on_cuda = str(device).startswith("cuda")
     amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(precision)
@@ -229,7 +232,13 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             with torch.autocast(device_type="cuda", dtype=amp_dtype if use_amp else torch.bfloat16, enabled=use_amp):
                 recon, mu, logvar = ae_fwd(x)
                 perc = perceptual(recon, x, normalize=True).mean() if perceptual is not None else None
-            recon_loss = F.mse_loss(recon.float(), x, reduction="sum") / x.shape[0]
+            recon_err = (recon.float() - x) ** 2
+            if focal_weight > 0:
+                w = recon_err.detach()
+                w = 1.0 + focal_weight * (w / w.mean().clamp_min(1e-12))
+                recon_loss = (w * recon_err).sum() / (x.shape[0] * (1.0 + focal_weight))
+            else:
+                recon_loss = recon_err.sum() / x.shape[0]
             kl = _vae_kl(mu.float(), logvar.float())
             loss = recon_loss + kl_weight * kl
             if perc is not None:
