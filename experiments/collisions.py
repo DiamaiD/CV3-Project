@@ -212,9 +212,17 @@ def analyze(pos, valid, radius, mats, t_min=0):
             continue
         e_meas = -appr_out / appr_in
 
+        # drag momentum-impulse over the event window (force * time, mass-free):
+        # piecewise-constant velocity split at the closest-approach frame tc
+        def _dimp(v_in, v_out, r):
+            return (-AIR_DRAG_COEFF * r * (v_in * np.abs(v_in) * float(tc - t_in)
+                                           + v_out * np.abs(v_out) * float(t_out - tc)))
+
         mom_rows.append({"mi_mat": mats[i], "mj_mat": mats[j],
                          "ri": radius[i], "rj": radius[j],
                          "dvi": dvi.tolist(), "dvj": dvj.tolist(),
+                         "dimp_i": _dimp(vi_in, vi_out, radius[i]).tolist(),
+                         "dimp_j": _dimp(vj_in, vj_out, radius[j]).tolist(),
                          "e_meas": e_meas,
                          "e_true": min(MATERIALS[mats[i]]["restitution"],
                                        MATERIALS[mats[j]]["restitution"])})
@@ -245,6 +253,8 @@ def momentum_rel(mom_rows, dens, cross_only=False):
         mi = np.pi * ev["ri"] ** 2 * dens[ev["mi_mat"]]
         mj = np.pi * ev["rj"] ** 2 * dens[ev["mj_mat"]]
         dP = mi * np.array(ev["dvi"]) + mj * np.array(ev["dvj"])
+        if "dimp_i" in ev:  # drag correction (mass-free force*time; absent in old rows)
+            dP = dP - np.array(ev["dimp_i"]) - np.array(ev["dimp_j"])
         J = 0.5 * (mi * np.linalg.norm(ev["dvi"]) + mj * np.linalg.norm(ev["dvj"]))
         if J < 1e-6:
             continue
