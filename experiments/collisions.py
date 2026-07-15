@@ -256,8 +256,16 @@ def momentum_stats(mom_rows, cross_only=False):
     out = {}
     for name, dens in MASS_MODELS.items():
         rel = momentum_rel(mom_rows, dens, cross_only)
+        if not rel.size:
+            out[name] = None
+            continue
         out[name] = {"n": int(rel.size), "median": float(np.median(rel)),
-                     "p90": float(np.percentile(rel, 90))} if rel.size else None
+                     "mean": float(np.mean(rel)),
+                     "std": float(np.std(rel, ddof=1)) if rel.size > 1 else 0.0,
+                     "p90": float(np.percentile(rel, 90)),
+                     "frac_over_0.1": float(np.mean(rel > 0.1)),
+                     "frac_over_0.5": float(np.mean(rel > 0.5)),
+                     "values": [float(v) for v in rel]}
     return out
 
 
@@ -302,7 +310,9 @@ def print_report(tag, mom_rows, wall_rows):
         sx = ms_x.get(name)
         xtra = f" | cross-material only: median {sx['median']:.4f} (n={sx['n']})" if sx else ""
         if s:
-            print(f"  mass model {name:>9}: median {s['median']:.4f} | p90 {s['p90']:.4f}{xtra}")
+            print(f"  mass model {name:>9}: median {s['median']:.4f} | mean {s['mean']:.4f} "
+                  f"(std {s['std']:.4f}) | p90 {s['p90']:.4f} | gross (>0.5): "
+                  f"{s['frac_over_0.5']:.0%}{xtra}")
     rs = restitution_stats(mom_rows)
     print("Ball-ball restitution (measured vs min-rule):")
     for k, v in rs.items():
