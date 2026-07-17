@@ -224,6 +224,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         tr_kl = torch.zeros((), device=device)
         tr_perc = torch.zeros((), device=device)
         tr_gnorm = torch.zeros((), device=device)
+        nan_skips = 0
         for ctx_frames, target_frame in train_loader:
             B, T, C, H, W = ctx_frames.shape
             x = ctx_frames.view(-1, C, H, W).to(device)
@@ -244,6 +245,11 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             if perc is not None:
                 loss = loss + lpips_weight * perc.float()
                 tr_perc += perc.detach().float()
+            if not torch.isfinite(loss):
+                nan_skips += 1
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                continue
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             gnorm = torch.nn.utils.clip_grad_norm_(ae.parameters(), max_norm=grad_clip)
@@ -283,7 +289,12 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
               f"GradNorm: {tr_gnorm.item()/nb_tr:.3f} | "
               f"Train Recon(sum): {tr_recon.item()/nb_tr:.4f} | "
               f"Train KL: {tr_kl.item()/nb_tr:.2f} | {perc_str}Val MSE: {val_mse_mean:.8f} | "
-              f"Val PSNR: {val_psnr:.2f} dB | Val KL: {val_kl.item()/nb_val:.2f}")
+              f"Val PSNR: {val_psnr:.2f} dB | Val KL: {val_kl.item()/nb_val:.2f}"
+              + (f" | NaN-skipped: {nan_skips}" if nan_skips else ""))
+        if nan_skips > 0.5 * nb_tr:
+            print(f"[VAE] Divergence: {nan_skips}/{nb_tr} non-finite steps in epoch {epoch+1} "
+                  f"-- weights are almost certainly NaN, aborting training early.")
+            break
     return ae
 
 
