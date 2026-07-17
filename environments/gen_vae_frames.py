@@ -43,8 +43,9 @@ def _clamp(b):
     b["y"] = float(np.clip(b["y"], r, HEIGHT - r))
 
 
-def _place_free(balls, i, resting_p=0.0, tries=60):
-    """Position ball i without overlapping balls[:i]."""
+def _place_free(balls, i, resting_p=0.0, tries=60, y_bias=1.8):
+    """Position ball i without overlapping balls[:i]. y_bias > 1 skews toward the
+    floor (gravity makes real frames cluster low); 1.0 = uniform."""
     b = balls[i]
     r = b["radius"]
     for _ in range(tries):
@@ -52,7 +53,7 @@ def _place_free(balls, i, resting_p=0.0, tries=60):
         if np.random.rand() < resting_p:
             b["y"] = float(r)
         else:
-            b["y"] = float(np.random.uniform(r, HEIGHT - r))
+            b["y"] = float(r + (HEIGHT - 2 * r) * np.random.rand() ** y_bias)
         if all((b["x"] - o["x"]) ** 2 + (b["y"] - o["y"]) ** 2 >= (r + o["radius"]) ** 2
                for o in balls[:i]):
             return
@@ -78,6 +79,12 @@ def sample_frame(balls, regime):
             ang = np.random.uniform(0, 2 * np.pi)
             b["x"], b["y"] = a["x"] + d * np.cos(ang), a["y"] + d * np.sin(ang)
             _clamp(b)
+        if n >= 3 and np.random.rand() < 0.4:  # triple pile: third ball onto an overlapped pair
+            a, c = balls[0], balls[-1]
+            d = np.random.uniform(0.6, 1.0) * (a["radius"] + c["radius"])
+            ang = np.random.uniform(0, np.pi)  # from above
+            c["x"], c["y"] = a["x"] + d * np.cos(ang), a["y"] + d * np.sin(ang)
+            _clamp(c)
     elif regime == "radii":
         for i in range(n):
             _place_free(balls, i, resting_p=0.25)
@@ -115,7 +122,7 @@ def main():
                   else "radii" if ti < cuts[2] else "wall")
         td = os.path.join(args.data_dir, f"traj-{ti}")
         os.makedirs(td, exist_ok=True)
-        n = np.random.randint(2, 6) if regime != "wall" else np.random.randint(2, 5)
+        n = np.random.randint(1, 7) if regime in ("natural", "radii") else np.random.randint(2, 6)
         balls = []
         for _ in range(n):
             mat = np.random.choice(list(MATERIALS.keys()))
