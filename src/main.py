@@ -13,7 +13,7 @@ import glob
 logging.getLogger("torch._inductor").setLevel(logging.ERROR)
 logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
 
-from src.dataset import FrameCache, CachedLoader
+from src.dataset import FrameCache, CachedLoader, build_state_targets
 from src.models import CNNVAE, DiffusionTransformer
 from src.train import (train_autoencoder, build_latent_cache, train_flow_matching,
                        score_latent_predictability, retrain_decoder)
@@ -48,7 +48,8 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_batch_size=32, dyn_batch_size=64, ae_epochs=20, dyn_epochs=30,
                           ae_learning_rate=5e-4, ae_weight_decay=1e-2, ae_kl_weight=0.005,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_focal_weight=0.0,
-                          ae_pred_weight=0.0, ae_probe="on", ae_grad_clip=10.0, ae_precision="bf16",
+                          ae_pred_weight=0.0, ae_state_weight=0.0, ae_probe="on",
+                          ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dit_min_lr=1e-6, dit_warmup_frac=0.05,
                           dyn_epochs_2=0, dyn_learning_rate_2=2e-4, dit_min_lr_2=2e-6,
                           dyn_weight_decay=1e-4, dit_grad_clip=3.0,
@@ -109,10 +110,10 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     frame_cache = FrameCache(all_trajs, cache_device=cache_device,
                              disk_cache_path=os.path.join(data_dir, "frames_cache.pt"))
 
-    def pixel_loader(trajs, horizon, shuffle, bs):
+    def pixel_loader(trajs, horizon, shuffle, bs, aux=None):
         ctx_idx, tgt_idx = frame_cache.build_windows(trajs, context_len, horizon)
         return CachedLoader(frame_cache.frames, ctx_idx, tgt_idx, bs, device,
-                            shuffle=shuffle, horizon=horizon)
+                            shuffle=shuffle, horizon=horizon, aux=aux)
 
     ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
                 enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=vae_dec_res_blocks).to(device)
@@ -124,12 +125,14 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     else:
         if ae_checkpoint:
             print(f"[Warn] AE checkpoint not found: {ae_checkpoint}. Training a new autoencoder.")
-        ae = train_autoencoder(ae, pixel_loader(train_trajs, 1, True, ae_batch_size),
+        state_targets = build_state_targets(frame_cache, data_dir, grid=latent_grid) if ae_state_weight > 0 else None
+        ae = train_autoencoder(ae, pixel_loader(train_trajs, 1, True, ae_batch_size, aux=state_targets),
                                pixel_loader(val_trajs, 1, False, ae_batch_size),
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
                                weight_decay=ae_weight_decay, kl_weight=ae_kl_weight,
                                lpips_weight=ae_lpips_weight, lpips_net=ae_lpips_net,
                                focal_weight=ae_focal_weight, pred_weight=ae_pred_weight,
+                               state_weight=ae_state_weight,
                                grad_clip=ae_grad_clip, precision=ae_precision, compile_mode=compile_mode, device=device)
 
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
@@ -257,6 +260,7 @@ if __name__ == "__main__":
     parser.add_argument("--ae_lpips_weight", type=float, default=0.0, help="Perceptual (LPIPS) loss weight on the VAE. 0 = off (pixel+KL only). ~1.0 makes latent L2 track perceptual quality, the key fix for the prediction-blur ceiling. Needs `pip install lpips`.")
     parser.add_argument("--ae_lpips_net", type=str, default="alex", choices=["alex", "vgg"], help="LPIPS backbone for Phase 1. alex is cheaper and historically gave the more PREDICTABLE latent (better DiT); vgg pushes recon sharper but traded predictability away in every run so far.")
     parser.add_argument("--ae_pred_weight", type=float, default=0.0, help="Predictability loss weight on the VAE (0 = off). A small linear (3x3 conv) predictor is trained jointly to guess each frame's latent from the previous frame's; its variance-normalized error is added to the loss. Directly shapes the latent toward what the DiT consumes (REPA/VA-VAE-style, with next-frame prediction instead of foundation-model alignment). Needs temporally coherent training data.")
+    parser.add_argument("--ae_state_weight", type=float, default=0.0, help="State-alignment loss weight on the VAE (0 = off). A 1x1 linear head must read per-cell ball presence + sub-cell offset straight from the latent (targets from positions.npy). Forces positions to be linearly readable (REPA-style, with the true physics state instead of a foundation model).")
     parser.add_argument("--ae_probe", choices=["on", "off"], default="on", help="In-run LatentProbe after VAE training. Turn off for AEs trained on non-temporal data (e.g. synthesized frame sets), where 1-step windows are meaningless -- score those with experiments/surrogate.py on real data instead.")
     parser.add_argument("--ae_focal_weight", type=float, default=0.0, help="Error-focused pixel weighting on the VAE recon loss (0 = off). Each pixel's squared error is upweighted by 1 + w*(err/mean_err), detached and scale-normalized by (1+w) so the recon/LPIPS balance stays fixed. Concentrates capacity on hard pixels (ball-ball contact regions carry ~8x the squared error of free flight).")
     parser.add_argument("--ae_grad_clip", type=float, default=10.0, help="Max global grad norm for the VAE (clipped each step). Safety net against the loss spikes a deeper LPIPS backbone (e.g. VGG) can trigger. The sum-reduced recon makes norms large, so this is loose; the logged GradNorm (pre-clip) shows the steady-state -- tighten toward ~2-3x it once observed.")
@@ -316,7 +320,7 @@ if __name__ == "__main__":
         ae_learning_rate=args.ae_learning_rate, ae_weight_decay=args.ae_weight_decay, ae_kl_weight=args.ae_kl_weight,
         ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
         ae_focal_weight=args.ae_focal_weight, ae_pred_weight=args.ae_pred_weight,
-        ae_probe=args.ae_probe, ae_grad_clip=args.ae_grad_clip,
+        ae_state_weight=args.ae_state_weight, ae_probe=args.ae_probe, ae_grad_clip=args.ae_grad_clip,
         dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
         dit_warmup_frac=args.dit_warmup_frac,
         dyn_epochs_2=args.dyn_epochs_2, dyn_learning_rate_2=args.dyn_learning_rate_2,

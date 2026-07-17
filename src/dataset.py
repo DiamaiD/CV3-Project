@@ -123,8 +123,9 @@ class FrameCache:
 
 class CachedLoader:
     def __init__(self, source, ctx_index, tgt_index, batch_size, device,
-                 shuffle=False, horizon=1, sample_weights=None):
+                 shuffle=False, horizon=1, sample_weights=None, aux=None):
         self.source = source
+        self.aux = aux  # optional per-frame target tensor, indexed like source
         self.ctx_index = ctx_index
         self.tgt_index = tgt_index
         self.batch_size = batch_size
@@ -158,4 +159,31 @@ class CachedLoader:
             tgt = self._to_float(self.source[self.tgt_index[rows]])
             if self.horizon == 1:
                 tgt = tgt[:, 0]
-            yield ctx, tgt
+            if self.aux is not None:
+                aux = self.aux[self.ctx_index[rows]].to(self.device, non_blocking=True).float()
+                yield ctx, tgt, aux
+            else:
+                yield ctx, tgt
+
+
+def build_state_targets(frame_cache, data_dir, grid=8, frame_px=64):
+    """Per-frame position targets for the VAE state-alignment loss: for each
+    grid cell, [presence, dx, dy] of the ball center inside it (dx/dy = offset
+    from the cell center in cell units, 0 where empty). Built from each traj's
+    positions.npy; indexed identically to frame_cache.frames."""
+    cell = frame_px // grid
+    N = frame_cache.frames.shape[0]
+    S = torch.zeros((N, 3, grid, grid), dtype=torch.float16)
+    for name, (start, count) in frame_cache.ranges.items():
+        pos = np.load(os.path.join(data_dir, name, "positions.npy"))
+        T = min(count, pos.shape[0])
+        for t in range(T):
+            for x, y in pos[t]:
+                col, row = x - 0.5, (frame_px - 0.5) - y
+                j, i = int(col // cell), int(row // cell)
+                if 0 <= i < grid and 0 <= j < grid:
+                    S[start + t, 0, i, j] = 1.0
+                    S[start + t, 1, i, j] = (col - (cell * j + cell / 2 - 0.5)) / cell
+                    S[start + t, 2, i, j] = (row - (cell * i + cell / 2 - 0.5)) / cell
+    print(f"[StateTargets] Built {N} frame targets ({S.numel() * 2 / 1e9:.2f} GB).")
+    return S
