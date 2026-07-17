@@ -179,8 +179,8 @@ def build_lpips(device, net="alex"):
 
 def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
                       weight_decay=1e-4, kl_weight=1.0, lpips_weight=0.0, lpips_net="alex",
-                      focal_weight=0.0, grad_clip=10.0, precision="bf16", compile_mode="off",
-                      device="cuda"):
+                      focal_weight=0.0, pred_weight=0.0, grad_clip=10.0, precision="bf16",
+                      compile_mode="off", device="cuda"):
     print(f"--- Phase 1: Training Autoencoder (VAE) ---")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -197,6 +197,10 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         print(f"[VAE] Perceptual loss ON: LPIPS-{backbone}, weight {lpips_weight}.")
     if focal_weight > 0:
         print(f"[VAE] Focal pixel weighting ON: {focal_weight} (error-proportional, scale-normalized).")
+    pred_head = None
+    if pred_weight > 0:
+        print(f"[VAE] Predictability loss ON: weight {pred_weight} (3x3 linear next-latent "
+              f"predictor on consecutive window frames, variance-normalized).")
 
     on_cuda = str(device).startswith("cuda")
     amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(precision)
@@ -224,6 +228,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         tr_kl = torch.zeros((), device=device)
         tr_perc = torch.zeros((), device=device)
         tr_gnorm = torch.zeros((), device=device)
+        tr_pred = torch.zeros((), device=device)
         nan_skips = 0
         for ctx_frames, target_frame in train_loader:
             B, T, C, H, W = ctx_frames.shape
@@ -245,6 +250,17 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
             if perc is not None:
                 loss = loss + lpips_weight * perc.float()
                 tr_perc += perc.detach().float()
+            if pred_weight > 0 and T > 1:
+                zc = mu.float().view(B, T, *mu.shape[1:])
+                if pred_head is None:
+                    pred_head = torch.nn.Conv2d(zc.shape[2], zc.shape[2], 3, padding=1).to(device)
+                    optimizer.add_param_group({"params": pred_head.parameters()})
+                zprev = zc[:, :-1].reshape(-1, *zc.shape[2:])
+                znext = zc[:, 1:].reshape(-1, *zc.shape[2:])
+                var = znext.detach().var().clamp_min(1e-8)
+                pred_loss = F.mse_loss(pred_head(zprev), znext) / var
+                loss = loss + pred_weight * pred_loss
+                tr_pred += pred_loss.detach()
             if not torch.isfinite(loss):
                 nan_skips += 1
                 optimizer.zero_grad(set_to_none=True)
@@ -290,6 +306,7 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
               f"Train Recon(sum): {tr_recon.item()/nb_tr:.4f} | "
               f"Train KL: {tr_kl.item()/nb_tr:.2f} | {perc_str}Val MSE: {val_mse_mean:.8f} | "
               f"Val PSNR: {val_psnr:.2f} dB | Val KL: {val_kl.item()/nb_val:.2f}"
+              + (f" | Pred: {tr_pred.item()/nb_tr:.4f}" if pred_weight > 0 else "")
               + (f" | NaN-skipped: {nan_skips}" if nan_skips else ""))
         if nan_skips > 0.5 * nb_tr:
             print(f"[VAE] Divergence: {nan_skips}/{nb_tr} non-finite steps in epoch {epoch+1} "
