@@ -122,11 +122,13 @@ def main():
                   else "radii" if ti < cuts[2] else "wall")
         td = os.path.join(args.data_dir, f"traj-{ti}")
         os.makedirs(td, exist_ok=True)
-        n = np.random.randint(1, 7) if regime in ("natural", "radii") else np.random.randint(2, 6)
+        # up to 10 balls: the AE must out-cover every OOD scene the DiT will be tested on
+        n = np.random.randint(1, 11) if regime in ("natural", "radii") else np.random.randint(2, 9)
         balls = []
         for _ in range(n):
             mat = np.random.choice(list(MATERIALS.keys()))
-            radius = float(np.random.uniform(4.0, 8.5)) if regime == "radii" else float(np.random.randint(5, 9))
+            r_hi = 7 if n >= 7 else 9  # crowded scenes use smaller balls to stay placeable
+            radius = float(np.random.uniform(4.0, 8.5)) if regime == "radii" else float(np.random.randint(5, r_hi))
             balls.append({"mat": MATERIALS[mat], "radius": radius, "x": 32.0, "y": 32.0})
         positions = []
         for fi in range(args.frames):
