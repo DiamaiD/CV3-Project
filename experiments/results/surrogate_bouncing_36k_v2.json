@@ -1,0 +1,18 @@
+{
+  "runs/2026_07_15__10_42_42__bouncing_10k_b25_flow": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/bouncing_10k_b25",
+    "latent_scale": 6.384094715118408,
+    "latent_r2": 0.9781329928745722,
+    "surrogate_psnr": 24.402556701944533,
+    "recon_psnr": 48.85434509756794
+  },
+  "runs/2026_07_16__03_14_52__bouncing_10k_b25_flow": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/bouncing_10k_b25",
+    "latent_scale": 1.6234365701675415,
+    "latent_r2": 0.9744759149990497,
+    "surrogate_psnr": 24.229839154119833,
+    "recon_psnr": 48.159412644981956
+  }
+}
