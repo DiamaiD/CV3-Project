@@ -220,4 +220,10 @@ __marimo__/
 data/
 runs/
 
+# one-off working scripts / probes (not part of the pipeline)
+scratchpad/
+
 .claude
+
+# generated report documents (PDFs etc.)
+reports/
