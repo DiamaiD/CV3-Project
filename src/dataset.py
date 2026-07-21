@@ -60,7 +60,8 @@ class FrameCache:
                 print(f"[Cache] Failed to load {disk_cache_path} ({e}) -- rebuilding.")
 
         if frames is None:
-            frames, ranges = self._decode(listing)
+            scratch = (disk_cache_path + ".decode.tmp") if disk_cache_path else None
+            frames, ranges = self._decode(listing, scratch_path=scratch)
             if disk_cache_path:
                 try:
                     torch.save({"frames": frames, "ranges": ranges, "sig": sig}, disk_cache_path)
@@ -72,6 +73,8 @@ class FrameCache:
                     print("[Cache] Re-opened as memory-map; decoded tensor released from RAM.")
                 except Exception as e:
                     print(f"[Cache] Could not save cache to {disk_cache_path}: {e}")
+            if scratch and os.path.exists(scratch):
+                os.remove(scratch)
 
         self.sig = sig
         self.ranges = ranges
@@ -79,24 +82,39 @@ class FrameCache:
         self.device = self.frames.device
 
     @staticmethod
-    def _decode(listing):
+    def _decode(listing, scratch_path=None):
+        """Decode all frames into one uint8 tensor. When the tensor would crowd
+        physical RAM (big mixes), it is allocated disk-backed via a scratch file
+        and filled through the page cache instead -- same result, bounded RAM.
+        Training speed is unaffected either way: the saved cache is reopened as
+        a memory-map afterwards in both paths."""
         ranges, start = {}, 0
         total = sum(len(p) for p in listing.values())
-        print(f"[Cache] Decoding {total} frames into memory (one-time)...")
-        frames = None
+        first = next((p for ps in listing.values() for p in ps), None)
+        H, W = (np.asarray(Image.open(first).convert("RGB")).shape[:2]) if first else (0, 0)
+        nbytes = total * 3 * H * W
+        phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        disk_backed = scratch_path is not None and nbytes > 0.5 * phys
+        if disk_backed:
+            print(f"[Cache] Decoding {total} frames into a disk-backed buffer "
+                  f"({nbytes / 1e9:.1f} GB > half of {phys / 1e9:.0f} GB RAM)...")
+            frames = torch.from_file(scratch_path, shared=True, size=nbytes,
+                                     dtype=torch.uint8).view(total, 3, H, W)
+        else:
+            print(f"[Cache] Decoding {total} frames into memory (one-time)...")
+            frames = torch.empty((total, 3, H, W), dtype=torch.uint8)
         for name in sorted(listing.keys()):
             paths = listing[name]
             if not paths:
                 continue
             arr = np.stack([np.asarray(Image.open(p).convert("RGB")) for p in paths])
-            t = torch.from_numpy(arr).permute(0, 3, 1, 2)
-            if frames is None:
-                frames = torch.empty((total, *t.shape[1:]), dtype=t.dtype)
-            frames[start:start + t.shape[0]] = t
-            ranges[name] = (start, t.shape[0])
-            start += t.shape[0]
+            frames[start:start + arr.shape[0]] = torch.from_numpy(arr).permute(0, 3, 1, 2)
+            ranges[name] = (start, arr.shape[0])
+            start += arr.shape[0]
         if start != frames.shape[0]:
-            frames = frames[:start].contiguous()
+            frames = frames[:start]
+            if not disk_backed:
+                frames = frames.contiguous()
         return frames, ranges
 
     def build_windows(self, traj_dirs, context_len, horizon):
