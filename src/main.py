@@ -144,6 +144,12 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
     torch.save(ae.state_dict(), os.path.join(run_dir, "autoencoder.pth"))
 
+    if (dyn_epochs <= 0 and dyn_epochs_2 <= 0 and dec_epochs <= 0
+            and ae_probe != "on" and not dit_checkpoint):
+        print("[Pipeline] VAE-only run (no DiT phase, probe off, no decoder retrain) -- "
+              "skipping the latent cache and everything downstream.")
+        return
+
     z_all, latent_scale = build_latent_cache(ae, frame_cache.frames, device, cache_device,
                                              disk_cache_path=os.path.join(data_dir, "latents_cache.pt"),
                                              data_sig=frame_cache.sig)

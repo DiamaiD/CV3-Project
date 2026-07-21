@@ -1,4 +1,52 @@
 {
+  "runs/2026_07_21__15_39_38__vaescr_res64_11": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.18220742046833038,
+    "latent_r2": 0.9657535603258969,
+    "surrogate_psnr": 28.061834427084122,
+    "recon_psnr": 39.99394496340412
+  },
+  "runs/2026_07_21__16_27_52__vaescr_res64_12": {
+    "config": "enc1/dec2/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.13445742428302765,
+    "latent_r2": 0.9533066884399761,
+    "surrogate_psnr": 28.071072461404043,
+    "recon_psnr": 40.90500619798229
+  },
+  "runs/2026_07_21__17_08_20__vaescr_res64_22": {
+    "config": "enc2/dec2/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.1284056156873703,
+    "latent_r2": 0.9562619780915292,
+    "surrogate_psnr": 27.786827173981685,
+    "recon_psnr": 41.07352656832917
+  },
+  "runs/2026_07_21__18_59_32__vaescr_cnx64_11": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.23432500660419464,
+    "latent_r2": 0.9663349451007677,
+    "surrogate_psnr": 27.81528966162094,
+    "recon_psnr": 39.66939395788346
+  },
+  "runs/2026_07_21__19_41_23__vaescr_res48_11": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.2145944982767105,
+    "latent_r2": 0.9705439579155131,
+    "surrogate_psnr": 27.93369661211046,
+    "recon_psnr": 38.6574932800942
+  },
+  "runs/2026_07_21__20_07_22__vaescr_cnx64_12": {
+    "config": "enc1/dec2/ch32",
+    "trained_on": "data/mix3_screen",
+    "latent_scale": 0.11957686394453049,
+    "latent_r2": 0.9574616486672587,
+    "surrogate_psnr": 27.848839285825534,
+    "recon_psnr": 40.50565544636463
+  },
   "runs/2026_07_15__10_42_42__bouncing_10k_b25_flow": {
     "config": "enc1/dec1/ch32",
     "trained_on": "data/bouncing_10k_b25",
