@@ -5,8 +5,8 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from environments.env_bouncing import (_resolve_ball_collisions, _settle_contacts, GRAVITY,
-                                       AIR_DRAG_COEFF, WIDTH, HEIGHT, REST_VELOCITY,
+from environments.env_bouncing import (_resolve_ball_collisions, _settle_contacts, _update_sleep,
+                                       GRAVITY, AIR_DRAG_COEFF, WIDTH, HEIGHT, REST_VELOCITY,
                                        SUBPIX_BITS, _SUBPIX)
 from experiments.extractor import MATERIALS
 
@@ -17,7 +17,8 @@ def make_ball(mat, radius, x, y, vx, vy):
                     "restitution": m["restitution"], "friction": m["friction"]},
             "mat_name": mat, "radius": radius,
             "mass": (np.pi * radius ** 2) * m["density"],
-            "x": float(x), "y": float(y), "vx": float(vx), "vy": float(vy)}
+            "x": float(x), "y": float(y), "vx": float(vx), "vy": float(vy),
+            "asleep": False, "still": 0}
 
 
 def step_frame(balls, n_substeps=4):
@@ -26,6 +27,8 @@ def step_frame(balls, n_substeps=4):
     wall_hit = False
     for _ in range(n_substeps):
         for b in balls:
+            if b["asleep"]:
+                continue
             radius, mass = b["radius"], b["mass"]
             drag_x = -(AIR_DRAG_COEFF * b["vx"] * abs(b["vx"]) * radius) / mass
             drag_y = -(AIR_DRAG_COEFF * b["vy"] * abs(b["vy"]) * radius) / mass
@@ -40,6 +43,8 @@ def step_frame(balls, n_substeps=4):
             bb_hit = True
 
         for b in balls:
+            if b["asleep"]:
+                continue
             radius = b["radius"]
             fric = b["mat"]["friction"]
             rest = b["mat"]["restitution"]
@@ -62,6 +67,7 @@ def step_frame(balls, n_substeps=4):
                 b["vy"] *= fric
 
         _settle_contacts(balls, WIDTH, HEIGHT)
+        _update_sleep(balls, HEIGHT)
     return bb_hit, wall_hit
 
 
