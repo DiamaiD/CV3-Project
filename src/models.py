@@ -28,6 +28,53 @@ class ResBlock(nn.Module):
         return self.skip(x) + h
 
 
+class ConvNeXtBlock(nn.Module):
+    """ConvNeXt-style block: depthwise 7x7 for spatial mixing, then a pointwise
+    4x MLP with GELU for channel mixing. Same (in_ch, out_ch) interface and
+    zero-init residual convention as ResBlock."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.dw = nn.Conv2d(in_ch, in_ch, 7, padding=3, groups=in_ch)
+        self.norm = _group_norm(in_ch, max_groups=1)
+        self.pw1 = nn.Conv2d(in_ch, 4 * out_ch, 1)
+        self.pw2 = nn.Conv2d(4 * out_ch, out_ch, 1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        nn.init.zeros_(self.pw2.weight)
+        nn.init.zeros_(self.pw2.bias)
+
+    def forward(self, x):
+        h = self.pw2(F.gelu(self.pw1(self.norm(self.dw(x)))))
+        return self.skip(x) + h
+
+
+class MobileBlock(nn.Module):
+    """MobileNetV2-style inverted residual: 1x1 expand 4x, depthwise 3x3, 1x1
+    project -- most of the compute lives in cheap pointwise/depthwise convs, so
+    it trains noticeably faster than ResBlock at similar parameter count.
+    Pre-activation norms and zero-init projection, matching ResBlock's style."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        mid = 4 * in_ch
+        self.norm1 = _group_norm(in_ch)
+        self.expand = nn.Conv2d(in_ch, mid, 1)
+        self.norm2 = _group_norm(mid)
+        self.dw = nn.Conv2d(mid, mid, 3, padding=1, groups=mid)
+        self.norm3 = _group_norm(mid)
+        self.project = nn.Conv2d(mid, out_ch, 1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        nn.init.zeros_(self.project.weight)
+        nn.init.zeros_(self.project.bias)
+
+    def forward(self, x):
+        h = self.expand(F.silu(self.norm1(x)))
+        h = self.dw(F.silu(self.norm2(h)))
+        h = self.project(F.silu(self.norm3(h)))
+        return self.skip(x) + h
+
+
+VAE_BLOCKS = {"res": ResBlock, "convnext": ConvNeXtBlock, "mobile": MobileBlock}
+
+
 class AttnBlock(nn.Module):
     def __init__(self, ch, n_heads=4):
         super().__init__()
@@ -68,8 +115,10 @@ class Upsample(nn.Module):
 
 class CNNVAE(nn.Module):
     def __init__(self, latent_ch=32, latent_grid=8, img_size=64,
-                 base_ch=64, ch_mult=(1, 2, 4), enc_res_blocks=1, attn=True, dec_res_blocks=None):
+                 base_ch=64, ch_mult=(1, 2, 4), enc_res_blocks=1, attn=True, dec_res_blocks=None,
+                 block="res"):
         super().__init__()
+        Block = VAE_BLOCKS[block]
         n_stages = int(round(math.log2(img_size / latent_grid)))
         assert n_stages >= 1 and img_size == latent_grid * (2 ** n_stages), \
             f"img_size {img_size} must be latent_grid {latent_grid} x a power of two (>=2)"
@@ -88,14 +137,14 @@ class CNNVAE(nn.Module):
             enc.append(Downsample(cur))
             if enc_res_blocks > 0:
                 for _ in range(enc_res_blocks):
-                    enc.append(ResBlock(cur, widths[i])); cur = widths[i]
+                    enc.append(Block(cur, widths[i])); cur = widths[i]
             else:
                 enc.append(nn.Conv2d(cur, widths[i], 3, padding=1)); cur = widths[i]
                 enc.append(nn.SiLU())
         self.enc = nn.Sequential(*enc)
 
         if enc_res_blocks > 0:
-            mid_enc = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+            mid_enc = [Block(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [Block(cur, cur)]
             self.enc_mid = nn.Sequential(*mid_enc)
         else:
             self.enc_mid = nn.Identity()
@@ -106,7 +155,7 @@ class CNNVAE(nn.Module):
 
         self.dec_in = nn.Conv2d(latent_ch, cur, 3, padding=1)
         if dec_res_blocks > 0:
-            mid_dec = [ResBlock(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [ResBlock(cur, cur)]
+            mid_dec = [Block(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [Block(cur, cur)]
             self.dec_mid = nn.Sequential(*mid_dec)
         else:
             self.dec_mid = nn.Identity()
@@ -114,7 +163,7 @@ class CNNVAE(nn.Module):
         for i in reversed(range(n_stages)):
             if dec_res_blocks > 0:
                 for _ in range(dec_res_blocks):
-                    dec.append(ResBlock(cur, widths[i])); cur = widths[i]
+                    dec.append(Block(cur, widths[i])); cur = widths[i]
             else:
                 dec.append(nn.Conv2d(cur, widths[i], 3, padding=1)); cur = widths[i]
                 dec.append(nn.SiLU())

@@ -73,6 +73,7 @@ class FrameCache:
                 except Exception as e:
                     print(f"[Cache] Could not save cache to {disk_cache_path}: {e}")
 
+        self.sig = sig
         self.ranges = ranges
         self.frames = frames.to(cache_device)
         self.device = self.frames.device

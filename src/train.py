@@ -1,6 +1,8 @@
+import os
 import time
 import math
 import random
+import hashlib
 import warnings
 import torch
 import torch.nn as nn
@@ -24,11 +26,25 @@ def build_warmup_cosine(optimizer, total_steps, warmup_frac=0.05, min_factor=0.0
     return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
 
-def build_restart_cosine(optimizer, steps_1, lr_1, min_lr_1, steps_2, lr_2, min_lr_2, warmup_frac=0.05):
-    """Cosine anneal lr_1 -> min_lr_1 over steps_1 (linear warmup first), then a single warm
-    restart: jump to lr_2 and cosine down to min_lr_2 over steps_2. Weights and optimizer state
-    carry over; only the LR jumps. Factors are relative to lr_1 (the optimizer's base LR).
-    steps_2 == 0 reduces exactly to the single-schedule behavior of build_warmup_cosine."""
+def _decay_factor(shape, progress):
+    """Monotone decay from 1.0 (progress 0) to 0.0 (progress 1). Shapes differ only in
+    WHERE they linger: cosine's rate is zero at both endpoints so it crawls near the floor;
+    linear holds one constant rate the whole way. That matters at a two-iteration handoff --
+    with a matched floor->peak (e.g. 5e-5 -> 5e-5) cosine dwells near that LR at the tail of
+    iter 1 AND the head of iter 2, over-training the handoff band; linear does not."""
+    p = min(max(progress, 0.0), 1.0)
+    if shape == "linear":
+        return 1.0 - p
+    return 0.5 * (1.0 + math.cos(math.pi * p))
+
+
+def build_restart_schedule(optimizer, steps_1, lr_1, min_lr_1, steps_2, lr_2, min_lr_2,
+                           warmup_frac=0.05, shape="cosine", shape_2="cosine"):
+    """Anneal lr_1 -> min_lr_1 over steps_1 (linear warmup first), then a single warm
+    restart: jump to lr_2 and anneal to min_lr_2 over steps_2. Weights and optimizer state
+    carry over; only the LR jumps. `shape` picks iteration 1's decay curve and `shape_2`
+    iteration 2's (see _decay_factor) -- they are independent. Factors are relative to lr_1
+    (the optimizer's base LR). steps_2 == 0 reduces exactly to a single decay schedule."""
     warmup_steps = max(0, min(int(round(steps_1 * warmup_frac)), steps_1 - 1))
     decay_1 = max(1, steps_1 - warmup_steps)
     m1 = min(max(min_lr_1 / lr_1 if lr_1 > 0 else 0.0, 0.0), 1.0)
@@ -39,20 +55,43 @@ def build_restart_cosine(optimizer, steps_1, lr_1, min_lr_1, steps_2, lr_2, min_
         if step < warmup_steps:
             return 0.01 + (1.0 - 0.01) * (step / warmup_steps)
         if step < steps_1 or steps_2 <= 0:
-            progress = min((step - warmup_steps) / decay_1, 1.0)
-            cos = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return m1 + (1.0 - m1) * cos
-        progress = min((step - steps_1) / steps_2, 1.0)
-        cos = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return r2 * (m2 + (1.0 - m2) * cos)
+            d = _decay_factor(shape, (step - warmup_steps) / decay_1)
+            return m1 + (1.0 - m1) * d
+        d = _decay_factor(shape_2, (step - steps_1) / steps_2)
+        return r2 * (m2 + (1.0 - m2) * d)
 
     return optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
 
 @torch.no_grad()
-def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
+def build_latent_cache(ae, frames, device, cache_device, batch_size=512,
+                       disk_cache_path=None, data_sig=None):
     ae.eval()
     M = frames.shape[0]
+
+    # Latents are only valid for one exact (VAE weights, dataset) pair, so the
+    # disk cache is keyed on both. A single file per dataset: any other VAE
+    # overwrites it rather than piling up per-VAE caches.
+    sig = None
+    if disk_cache_path:
+        h = hashlib.sha1()
+        for k, v in sorted(ae.state_dict().items()):
+            h.update(k.encode())
+            h.update(v.detach().cpu().float().numpy().tobytes())
+        sig = {"vae": h.hexdigest(), "data": data_sig}
+        if os.path.exists(disk_cache_path):
+            try:
+                blob = torch.load(disk_cache_path, map_location="cpu", weights_only=True)
+                if blob.get("sig") == sig:
+                    z_all = blob["z"].to(cache_device)
+                    latent_scale = blob["latent_scale"]
+                    print(f"[Cache] Loaded latent cache from {disk_cache_path} "
+                          f"({tuple(z_all.shape)} float16, scale {latent_scale.item():.4f}) -- skipping encode.")
+                    return z_all, latent_scale
+                print(f"[Cache] {disk_cache_path} is for a different VAE or dataset -- re-encoding.")
+            except Exception as e:
+                print(f"[Cache] Failed to load {disk_cache_path} ({e}) -- re-encoding.")
+
     z_all = None
     print(f"[Cache] Encoding {M} frames into latent cache (one-time)...")
     for i in range(0, M, batch_size):
@@ -75,6 +114,15 @@ def build_latent_cache(ae, frames, device, cache_device, batch_size=512):
     z_all.div_(gstd)
     latent_scale = torch.tensor(gstd)
     print(f"[Cache] Latent scale (std) = {gstd:.4f}; normalized cache to ~unit variance.")
+
+    if disk_cache_path:
+        try:
+            torch.save({"z": z_all.cpu(), "latent_scale": latent_scale, "sig": sig}, disk_cache_path)
+            print(f"[Cache] Saved latent cache to {disk_cache_path} "
+                  f"(~{z_all.numel() * 2 / 1e9:.2f} GB, replaces any previous VAE's cache).")
+        except Exception as e:
+            print(f"[Cache] Could not save latent cache to {disk_cache_path}: {e}")
+
     return z_all, latent_scale
 
 
@@ -333,7 +381,9 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
 
 
 def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rate=3e-4,
-                        min_lr=1e-6, warmup_frac=0.05, epochs_2=0, learning_rate_2=2e-4,
+                        min_lr=1e-6, warmup_frac=0.05, lr_schedule="cosine",
+                        lr_schedule_2="cosine", epochs_2=0,
+                        learning_rate_2=2e-4,
                         min_lr_2=2e-6, weight_decay=1e-4, grad_clip=3.0, ema_decay=0.999,
                         context_noise=0.0, precision="bf16", compile_mode="off",
                         t_dist="logit_normal", loss_type="mse", huber_c=1.0, device="cuda"):
@@ -349,18 +399,19 @@ def train_flow_matching(model, train_loader, val_loader, epochs=15, learning_rat
     warmup_frac = min(max(warmup_frac, 0.0), 1.0)
     steps_1 = epochs * steps_per_epoch
     warmup_steps = max(0, min(int(round(steps_1 * warmup_frac)), steps_1 - 1))
-    scheduler = build_restart_cosine(optimizer, steps_1, learning_rate, min_lr,
-                                     epochs_2 * steps_per_epoch, learning_rate_2, min_lr_2,
-                                     warmup_frac=warmup_frac)
-    print("LR warmup: off (cosine decay starts at full LR)" if warmup_steps == 0
+    scheduler = build_restart_schedule(optimizer, steps_1, learning_rate, min_lr,
+                                       epochs_2 * steps_per_epoch, learning_rate_2, min_lr_2,
+                                       warmup_frac=warmup_frac, shape=lr_schedule,
+                                       shape_2=lr_schedule_2)
+    print(f"LR warmup: off ({lr_schedule} decay starts at full LR)" if warmup_steps == 0
           else f"LR warmup: {warmup_frac:g} of the first iteration ({warmup_steps} steps, "
                f"{warmup_frac * epochs:.2g} epochs)")
     if epochs_2 > 0:
-        print(f"LR schedule: warm restart after epoch {epochs} -- iter 1: {learning_rate:.1e} -> "
-              f"{min_lr:.1e} over {epochs} ep, then iter 2: {learning_rate_2:.1e} -> {min_lr_2:.1e} "
+        print(f"LR schedule: warm restart after epoch {epochs} -- iter 1 ({lr_schedule}): {learning_rate:.1e} -> "
+              f"{min_lr:.1e} over {epochs} ep, then iter 2 ({lr_schedule_2}): {learning_rate_2:.1e} -> {min_lr_2:.1e} "
               f"over {epochs_2} ep (weights, optimizer state and EMA carry over)")
     elif min_lr > 0:
-        print(f"LR floor: cosine anneals from {learning_rate:.1e} to {min_lr:.1e} over the full schedule "
+        print(f"LR floor: {lr_schedule} anneals from {learning_rate:.1e} to {min_lr:.1e} over the full schedule "
               f"(reaches the floor at the final step)")
 
     batch_size = getattr(train_loader, "batch_size", 0)

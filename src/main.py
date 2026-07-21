@@ -51,21 +51,26 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_pred_weight=0.0, ae_state_weight=0.0, ae_probe="on",
                           ae_grad_clip=10.0, ae_precision="bf16",
                           dyn_learning_rate=3e-4, dit_min_lr=1e-6, dit_warmup_frac=0.05,
+                          dit_lr_schedule="cosine", dit_lr_schedule_2="cosine",
                           dyn_epochs_2=0, dyn_learning_rate_2=2e-4, dit_min_lr_2=2e-6,
                           dyn_weight_decay=1e-4, dit_grad_clip=3.0,
                           dit_ema_decay=0.999, dit_context_noise=0.0, dit_precision="bf16",
                           compile_mode="off", dit_event_weights="off",
                           dit_t_dist="logit_normal", dit_loss="mse", dit_huber_c=1.0,
-                          dec_epochs=0, dec_learning_rate=1e-4, dec_lpips_weight=1.0, dec_lpips_net="alex",
-                          dec_rollout_k=5, dec_clean_frac=0.3, dec_grad_clip=10.0, dec_res_blocks=1,
-                          dec_n_train_traj=1000, dec_checkpoint="", dec_precision="bf16",
+                          dec_epochs=0, dec_learning_rate=1e-2, dec_lpips_weight=1.0, dec_lpips_net="alex",
+                          dec_rollout_k=5, dec_clean_frac=0.5, dec_grad_clip=30.0, dec_res_blocks=1,
+                          dec_n_train_traj=4000, dec_checkpoint="", dec_precision="bf16",
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
-                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40,
-                          seed=None, ae_checkpoint="", dit_checkpoint="", latent_grid=8, latent_ch=32,
+                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40, coll_eval="on",
+                          seed=None, ae_checkpoint="", dit_checkpoint="", dit_continue=False,
+                          latent_grid=8, latent_ch=32,
                           vae_enc_res_blocks=1, vae_dec_res_blocks=1,
+                          vae_base_ch=64, vae_block="res",
                           chunk_len=5, dit_d_model=256, dit_n_layers=6, dit_n_heads=8, inference_steps=10):
     run_config = dict(locals())
-    run_dir, log_filepath = setup_run_folder(f"{env_name}_flow")
+    _is_cont = (bool(dit_continue) and bool(dit_checkpoint)
+                and os.path.exists(dit_checkpoint) and dyn_epochs > 0)
+    run_dir, log_filepath = setup_run_folder(f"{env_name}_cont" if _is_cont else env_name)
     with open(os.path.join(run_dir, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=4)
 
@@ -115,8 +120,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         return CachedLoader(frame_cache.frames, ctx_idx, tgt_idx, bs, device,
                             shuffle=shuffle, horizon=horizon, aux=aux)
 
-    ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
-                enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=vae_dec_res_blocks).to(device)
+    ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
+                block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                dec_res_blocks=vae_dec_res_blocks).to(device)
 
     vae_trained = not (ae_checkpoint and os.path.exists(ae_checkpoint))
     if not vae_trained:
@@ -138,7 +144,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
     torch.save(ae.state_dict(), os.path.join(run_dir, "autoencoder.pth"))
 
-    z_all, latent_scale = build_latent_cache(ae, frame_cache.frames, device, cache_device)
+    z_all, latent_scale = build_latent_cache(ae, frame_cache.frames, device, cache_device,
+                                             disk_cache_path=os.path.join(data_dir, "latents_cache.pt"),
+                                             data_sig=frame_cache.sig)
     latent_ch, grid = z_all.shape[1], z_all.shape[-1]
 
     if vae_trained and ae_probe == "on":
@@ -152,6 +160,14 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     dit_loaded = bool(dit_checkpoint) and os.path.exists(dit_checkpoint)
     if dit_checkpoint and not dit_loaded:
         print(f"[Warn] DiT checkpoint not found: {dit_checkpoint}. Training a new DiT.")
+    continue_dit = dit_loaded and bool(dit_continue) and dyn_epochs > 0
+    if dit_loaded and bool(dit_continue) and dyn_epochs <= 0:
+        print("[Warn] Continue requested but DiT epochs = 0 -- nothing to continue; "
+              "loading the checkpoint for evaluation only.")
+    if continue_dit and vae_trained:
+        print("[Warn] Continue is ON but no matching VAE checkpoint was loaded -- the VAE was "
+              "retrained, so its latent space differs from the source run and the loaded DiT weights "
+              "will NOT match it. Set the VAE checkpoint to the source run's autoencoder.pth.")
     if dyn_epochs <= 0 and not dit_loaded:
         print("DiT epochs = 0 and no DiT checkpoint -> stopping after the VAE stage "
               "(no DiT training, decoder training or evaluation).")
@@ -164,8 +180,14 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                ).to(device)
     if dit_loaded:
         dit.load_state_dict(torch.load(dit_checkpoint, map_location=device, weights_only=True))
-        print(f"Loaded DiT from {dit_checkpoint} -- skipping Phase 2.")
-    else:
+        if continue_dit:
+            print(f"Loaded DiT from {dit_checkpoint} -- CONTINUING training (Phase 2) from these "
+                  f"weights. Fresh optimizer + LR schedule; EMA re-seeds from the loaded weights "
+                  f"(dit.pth stores EMA weights only, so the first epoch re-warms the optimizer).")
+        else:
+            print(f"Loaded DiT from {dit_checkpoint} -- skipping Phase 2.")
+
+    if not dit_loaded or continue_dit:
         fm_train = latent_loader(train_trajs, chunk_len, True, dyn_batch_size)
         ev = _parse_event_weights(dit_event_weights)
         if ev is not None:
@@ -186,6 +208,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                   latent_loader(val_trajs, chunk_len, False, dyn_batch_size),
                                   epochs=dyn_epochs, learning_rate=dyn_learning_rate,
                                   min_lr=dit_min_lr, warmup_frac=dit_warmup_frac,
+                                  lr_schedule=dit_lr_schedule, lr_schedule_2=dit_lr_schedule_2,
                                   epochs_2=dyn_epochs_2, learning_rate_2=dyn_learning_rate_2,
                                   min_lr_2=dit_min_lr_2,
                                   weight_decay=dyn_weight_decay, grad_clip=dit_grad_clip,
@@ -199,14 +222,16 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     if dec_checkpoint and not dec_loaded:
         print(f"[Warn] Decoder checkpoint not found: {dec_checkpoint}. Training Phase 3 as configured.")
     if dec_loaded:
-        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
-                         enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=dec_res_blocks).to(device)
+        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
+                         block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                         dec_res_blocks=dec_res_blocks).to(device)
         ae_full.load_state_dict(torch.load(dec_checkpoint, map_location=device, weights_only=True))
         ae = ae_full.eval()
         print(f"Loaded final VAE (retrained decoder) from {dec_checkpoint} -- skipping Phase 3.")
     elif dec_epochs > 0:
-        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid,
-                         enc_res_blocks=vae_enc_res_blocks, dec_res_blocks=dec_res_blocks).to(device)
+        ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
+                         block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                         dec_res_blocks=dec_res_blocks).to(device)
         enc_state = {k: v for k, v in ae.state_dict().items()
                      if k.startswith(("conv_in", "enc", "to_mu", "to_logvar"))}
         ae_full.load_state_dict(enc_state, strict=False)
@@ -226,8 +251,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
 
     ae.eval(); dit.eval()
 
-    collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
-                               num_steps=inference_steps, run_dir=run_dir, device=device)
+    if coll_eval == "on":
+        collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
+                                   num_steps=inference_steps, run_dir=run_dir, device=device)
 
     def flow_predict_chunk(context):
         _, T, C, H, W = context.shape
@@ -269,6 +295,8 @@ if __name__ == "__main__":
     parser.add_argument("--dyn_learning_rate", type=float, default=3e-4)
     parser.add_argument("--dit_min_lr", type=float, default=1e-6, help="Phase 2 LR floor: the cosine anneal is rescaled to end exactly at this LR instead of zero (0 = decay to zero). Measured on 20k runs: below ~1e-6 val loss stops improving and the train/val gap keeps widening -- annealing into that region only overfits.")
     parser.add_argument("--dit_warmup_frac", type=float, default=0.05, help="Phase 2 LR warmup length as a fraction of the full schedule (0.05 = 5%%, the long-standing default). 0 = no warmup (cosine decay starts at full LR). Warmup steps come out of the same total budget, so shorter warmup means a longer decay.")
+    parser.add_argument("--dit_lr_schedule", choices=["cosine", "linear"], default="cosine", help="Shape of iteration 1's LR decay. cosine has zero slope at both ends, so it lingers near the floor -- in a matched two-iteration handoff (iter-1 floor == iter-2 peak) that band gets trained by the tail of iter 1 AND the head of iter 2, over-stressing it. linear holds a constant rate, so the handoff LR gets the same exposure as any other. Warmup (a linear ramp) is unaffected.")
+    parser.add_argument("--dit_lr_schedule_2", choices=["cosine", "linear"], default="cosine", help="Shape of iteration 2's LR decay (the warm-restart leg; only used when --dyn_epochs_2 > 0). Independent of --dit_lr_schedule, so you can e.g. run iter 1 linear to avoid over-stressing the handoff and iter 2 cosine to settle into the final floor.")
     parser.add_argument("--dyn_epochs_2", type=int, default=0, help="Warm-restart second iteration, in epochs. 0 = off (single cosine schedule, the default). >0: after --dyn_epochs finish annealing --dyn_learning_rate down to --dit_min_lr, the LR jumps to --dyn_learning_rate_2 and cosine-anneals to --dit_min_lr_2 over this many epochs. Weights, optimizer state and EMA carry over; warmup applies to the first iteration only. All other hyperparameters are shared by both iterations.")
     parser.add_argument("--dyn_learning_rate_2", type=float, default=2e-4, help="Peak LR of the warm-restart iteration (only used when --dyn_epochs_2 > 0).")
     parser.add_argument("--dit_min_lr_2", type=float, default=2e-6, help="LR floor of the warm-restart iteration (only used when --dyn_epochs_2 > 0).")
@@ -285,18 +313,21 @@ if __name__ == "__main__":
     parser.add_argument("--ae_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 1 (VAE) compute precision (autocast; fp16 adds gradient scaling).")
     parser.add_argument("--dec_precision", choices=["bf16", "fp16", "fp32"], default="bf16", help="Phase 3 (decoder) compute precision (autocast; fp16 adds gradient scaling).")
     parser.add_argument("--dit_context_noise", type=float, default=0.0, help="Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off; in normalized-latent units). Rollout-robustness regularizer against exposure bias; trades a little 1-step accuracy for steadier long horizons. Try ~0.02-0.1.")
+    parser.add_argument("--vae_base_ch", type=int, default=64, help="Base channel width of the VAE (stages run at base/2x/4x). A reused ae_checkpoint must match.")
+    parser.add_argument("--vae_block", type=str, default="res", choices=["res", "convnext", "mobile"], help="VAE block type: res = classic two-3x3-conv residual block, convnext = depthwise-7x7 + pointwise-MLP, mobile = MobileNetV2 inverted residual (fastest). A reused ae_checkpoint must match.")
     parser.add_argument("--vae_enc_res_blocks", type=int, default=1, help="Residual blocks per level in the VAE ENCODER. 0 = weak encoder (plain conv+downsample, no bottleneck/attention) -- it cannot write an entangled latent at all; 0/0 with the decoder approximates the pre-residual VAE. A reused ae_checkpoint must match this setting.")
     parser.add_argument("--vae_dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-1 decoder. 0 = weak decoder (plain conv+upsample, no bottleneck/attention): forces the encoder to write an explicit, predictable latent; pair with dec_epochs>0 so Phase 3 trains a full decoder for rendering. A reused ae_checkpoint must match this setting.")
     parser.add_argument("--dec_epochs", type=int, default=0, help="Phase 3: epochs to train a FRESH full-capacity decoder from scratch on clean + DiT-predicted latents (0 = off). Encoder + DiT stay frozen so the latent space and dit.pth remain valid; only the rendering changes. Runs after DiT training, before the final eval.")
-    parser.add_argument("--dec_learning_rate", type=float, default=5e-4, help="Phase 3 decoder LR (the decoder trains from scratch, so the full VAE-scale LR is appropriate).")
+    parser.add_argument("--dec_learning_rate", type=float, default=1e-2, help="Phase 3 decoder LR (the decoder trains from scratch, so the full VAE-scale LR is appropriate).")
     parser.add_argument("--dec_lpips_weight", type=float, default=1.0, help="Phase 3 perceptual (LPIPS) weight, same convention as ae_lpips_weight.")
     parser.add_argument("--dec_lpips_net", type=str, default="alex", choices=["alex", "vgg"], help="LPIPS backbone for Phase 3. Here the latent is FROZEN, so vgg's sharper gradients cannot hurt predictability -- it only shapes the renderer; worth trying vgg for crisper rollouts.")
     parser.add_argument("--dec_rollout_k", type=int, default=5, help="Phase 3 max rollout depth K: each batch decodes a DiT latent from a free-running rollout of random depth 1..K, so the decoder sees realistically drifted latents, not just 1-step error.")
-    parser.add_argument("--dec_clean_frac", type=float, default=0.3, help="Phase 3 fraction of batches that decode CLEAN cached encoder latents instead of DiT predictions -- anchors reconstruction quality so the decoder does not overfit to rendering model error.")
-    parser.add_argument("--dec_grad_clip", type=float, default=10.0, help="Max global grad norm for the Phase 3 decoder training (clipped each step).")
+    parser.add_argument("--dec_clean_frac", type=float, default=0.5, help="Phase 3 fraction of batches that decode CLEAN cached encoder latents instead of DiT predictions -- anchors reconstruction quality so the decoder does not overfit to rendering model error.")
+    parser.add_argument("--dec_grad_clip", type=float, default=30.0, help="Max global grad norm for the Phase 3 decoder training (clipped each step).")
     parser.add_argument("--dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-3 decoder that is trained from scratch (1 = full residual decoder with bottleneck+attention, 0 = weak plain decoder). Lets you match or exceed the Phase-1 decoder capacity for the final renderer.")
-    parser.add_argument("--dec_n_train_traj", type=int, default=1000, help="Phase 3 data cap: trajectories used to build the decoder-training windows (~90+ windows each at rollout_k=5; the full train split is ~4000). Epoch time scales ~linearly; raise it if the decoder underfits or for the final run.")
+    parser.add_argument("--dec_n_train_traj", type=int, default=4000, help="Phase 3 data cap: trajectories used to build the decoder-training windows (~90+ windows each at rollout_k=5; the full train split is ~4000). Epoch time scales ~linearly; raise it if the decoder underfits or for the final run.")
     parser.add_argument("--dit_checkpoint", type=str, default="", help="Path to a saved dit.pth to reuse (skips Phase 2, like --ae_checkpoint skips Phase 1). Must match the DiT architecture flags and belong to the same run as the reused VAE -- a DiT only understands the latent space it was trained on.")
+    parser.add_argument("--dit_continue", action="store_true", help="Continue training FROM --dit_checkpoint instead of skipping Phase 2: the loaded weights are the starting point and Phase 2 runs for --dyn_epochs more (fresh optimizer + LR schedule, since dit.pth holds EMA weights only). The run folder is tagged _cont. Pair with --ae_checkpoint from the SAME source run so the latent space matches. No effect without --dit_checkpoint or with --dyn_epochs 0.")
     parser.add_argument("--dec_checkpoint", type=str, default="", help="Path to a saved autoencoder_final.pth to reuse as the eval renderer (skips Phase 3 training). For DiT sweeps on a fixed VAE: keeps pixel metrics comparable without paying for decoder training every run. Must come from a run with the same latent space and match the enc/dec res-block flags.")
     parser.add_argument("--chunk_len", type=int, default=5, help="Chunk prediction: number of future frames (K) the DiT denoises jointly per call")
     parser.add_argument("--dit_d_model", type=int, default=256, help="DiT width (must be divisible by dit_n_heads)")
@@ -309,6 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_n_pngs", type=int, default=1, help="Number of eval prediction grid PNGs (8 scenarios each, collected across test batches).")
     parser.add_argument("--eval_n_gifs", type=int, default=2, help="Number of test trajectories rendered as rollout GIFs.")
     parser.add_argument("--eval_gif_len", type=int, default=40, help="Rollout steps per GIF; clamped to trajectory length minus context_len.")
+    parser.add_argument("--coll_eval", choices=["on", "off"], default="on", help="Event-conditioned 1-step eval (free/wall/post/contact PSNR table + collision_eval.json) after the main eval. Turn off to save a few minutes on quick runs.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible runs")
     parser.add_argument("--ae_checkpoint", type=str, default="", help="Path to a saved autoencoder.pth to reuse (skips Phase 1)")
     args = parser.parse_args()
@@ -321,8 +353,10 @@ if __name__ == "__main__":
         ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
         ae_focal_weight=args.ae_focal_weight, ae_pred_weight=args.ae_pred_weight,
         ae_state_weight=args.ae_state_weight, ae_probe=args.ae_probe, ae_grad_clip=args.ae_grad_clip,
+        vae_base_ch=args.vae_base_ch, vae_block=args.vae_block,
         dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
-        dit_warmup_frac=args.dit_warmup_frac,
+        dit_warmup_frac=args.dit_warmup_frac, dit_lr_schedule=args.dit_lr_schedule,
+        dit_lr_schedule_2=args.dit_lr_schedule_2,
         dyn_epochs_2=args.dyn_epochs_2, dyn_learning_rate_2=args.dyn_learning_rate_2,
         dit_min_lr_2=args.dit_min_lr_2,
         dyn_weight_decay=args.dyn_weight_decay,
@@ -342,7 +376,9 @@ if __name__ == "__main__":
         eval_horizon=args.eval_horizon, eval_max_batches=args.eval_max_batches,
         eval_best_of_n=args.eval_best_of_n,
         eval_n_pngs=args.eval_n_pngs, eval_n_gifs=args.eval_n_gifs, eval_gif_len=args.eval_gif_len,
+        coll_eval=args.coll_eval,
         seed=args.seed, ae_checkpoint=args.ae_checkpoint, dit_checkpoint=args.dit_checkpoint,
+        dit_continue=args.dit_continue,
         latent_grid=args.latent_grid, latent_ch=args.latent_ch,
         vae_enc_res_blocks=args.vae_enc_res_blocks, vae_dec_res_blocks=args.vae_dec_res_blocks,
         chunk_len=args.chunk_len, dit_d_model=args.dit_d_model, dit_n_layers=args.dit_n_layers,

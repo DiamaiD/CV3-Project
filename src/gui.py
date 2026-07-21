@@ -5,7 +5,6 @@ import json
 import shutil
 from tkinter import filedialog
 from src.main import run_training_pipeline
-from environments.env_bouncing import generate_bouncing_data
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -51,13 +50,10 @@ class TrainingGUI(ctk.CTk):
         self.tabview.pack(pady=5, padx=20, fill="x")
         self.tabview.add("VAE")
         self.tabview.add("Dynamics")
-        self.tabview.add("Decoder")
         self.tabview.add("Evaluation")
-        self.tabview.add("Data")
 
         vae_tab = self.tabview.tab("VAE")
         dyn_tab = self.tabview.tab("Dynamics")
-        dec_tab = self.tabview.tab("Decoder")
         eval_tab = self.tabview.tab("Evaluation")
 
         self.ae_frame = ctk.CTkFrame(vae_tab)
@@ -126,17 +122,22 @@ class TrainingGUI(ctk.CTk):
         self.ae_lpips_net_menu = ctk.CTkOptionMenu(self.ae_frame, values=["alex", "vgg"], font=self.huge_font, width=100)
         self.ae_lpips_net_menu.grid(row=3, column=7, padx=10, pady=10, sticky="w")
 
-        self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
-        self.ae_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
-        self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
-        self.ae_entry.grid(row=4, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
-        self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
-        self.ae_browse_button.grid(row=4, column=7, padx=10, pady=10)
+        self.ae_base_ch_label = ctk.CTkLabel(self.ae_frame, text="Base Ch:", font=self.bold_font)
+        self.ae_base_ch_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.ae_base_ch_entry = ctk.CTkEntry(self.ae_frame, width=80, font=self.huge_font)
+        self.ae_base_ch_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
 
-        self.ae_precision_label = ctk.CTkLabel(self.ae_frame, text="Precision:", font=self.bold_font)
-        self.ae_precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
-        self.ae_precision_menu = ctk.CTkOptionMenu(self.ae_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
-        self.ae_precision_menu.grid(row=5, column=1, padx=10, pady=10, sticky="w")
+        self.ae_block_label = ctk.CTkLabel(self.ae_frame, text="Block:", font=self.bold_font)
+        self.ae_block_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
+        self.ae_block_menu = ctk.CTkOptionMenu(self.ae_frame, values=["res", "convnext", "mobile"], font=self.huge_font, width=120)
+        self.ae_block_menu.grid(row=4, column=3, padx=10, pady=10, sticky="w")
+
+        self.ae_label = ctk.CTkLabel(self.ae_frame, text="Reuse AE:", font=self.bold_font)
+        self.ae_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
+        self.ae_entry = ctk.CTkEntry(self.ae_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder.pth (blank = train new)")
+        self.ae_entry.grid(row=5, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
+        self.ae_browse_button = ctk.CTkButton(self.ae_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_ae)
+        self.ae_browse_button.grid(row=5, column=7, padx=10, pady=10)
 
         self.dyn_frame = ctk.CTkFrame(dyn_tab)
         self.dyn_frame.pack(pady=10, padx=10, fill="x")
@@ -144,71 +145,28 @@ class TrainingGUI(ctk.CTk):
         self.dyn_section_label = ctk.CTkLabel(self.dyn_frame, text="Flow Matching (DiT)", font=self.bold_font)
         self.dyn_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
 
-        self.dyn_lr_label = ctk.CTkLabel(self.dyn_frame, text="Learn Rate:", font=self.bold_font)
-        self.dyn_lr_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
-        self.dyn_lr_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
-        self.dyn_lr_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
-
-        self.dyn_wd_label = ctk.CTkLabel(self.dyn_frame, text="Weight Decay:", font=self.bold_font)
-        self.dyn_wd_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
-        self.dyn_wd_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
-        self.dyn_wd_entry.grid(row=4, column=3, padx=10, pady=10, sticky="w")
-
-        self.dyn_batch_label = ctk.CTkLabel(self.dyn_frame, text="Batch:", font=self.bold_font)
-        self.dyn_batch_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
-        self.dyn_batch_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dyn_batch_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
-
+        # --- Iteration 1 (first leg):  Epochs | Learn Rate | Min LR | LR Curve ---
         self.dyn_epochs_label = ctk.CTkLabel(self.dyn_frame, text="Epochs:", font=self.bold_font)
         self.dyn_epochs_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
         self.dyn_epochs_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dyn_epochs_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
 
-        self.dit_dmodel_label = ctk.CTkLabel(self.dyn_frame, text="DiT Width:", font=self.bold_font)
-        self.dit_dmodel_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.dit_dmodel_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dit_dmodel_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-
-        self.dit_layers_label = ctk.CTkLabel(self.dyn_frame, text="DiT Layers:", font=self.bold_font)
-        self.dit_layers_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
-        self.dit_layers_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dit_layers_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
-
-        self.dit_heads_label = ctk.CTkLabel(self.dyn_frame, text="DiT Heads:", font=self.bold_font)
-        self.dit_heads_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
-        self.dit_heads_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dit_heads_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
-
-        self.chunk_len_label = ctk.CTkLabel(self.dyn_frame, text="Chunk Len:", font=self.bold_font)
-        self.chunk_len_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
-        self.chunk_len_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.chunk_len_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
-
-        self.ema_decay_label = ctk.CTkLabel(self.dyn_frame, text="EMA Decay:", font=self.bold_font)
-        self.ema_decay_label.grid(row=4, column=6, padx=10, pady=10, sticky="e")
-        self.ema_decay_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.ema_decay_entry.grid(row=4, column=7, padx=10, pady=10, sticky="w")
-
-        self.ctx_noise_label = ctk.CTkLabel(self.dyn_frame, text="Ctx Noise:", font=self.bold_font)
-        self.ctx_noise_label.grid(row=5, column=2, padx=10, pady=10, sticky="e")
-        self.ctx_noise_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.ctx_noise_entry.grid(row=5, column=3, padx=10, pady=10, sticky="w")
-
-        self.dit_clip_label = ctk.CTkLabel(self.dyn_frame, text="Grad Clip:", font=self.bold_font)
-        self.dit_clip_label.grid(row=4, column=4, padx=10, pady=10, sticky="e")
-        self.dit_clip_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dit_clip_entry.grid(row=4, column=5, padx=10, pady=10, sticky="w")
+        self.dyn_lr_label = ctk.CTkLabel(self.dyn_frame, text="Learn Rate:", font=self.bold_font)
+        self.dyn_lr_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
+        self.dyn_lr_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
+        self.dyn_lr_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
 
         self.dit_min_lr_label = ctk.CTkLabel(self.dyn_frame, text="Min LR:", font=self.bold_font)
         self.dit_min_lr_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
         self.dit_min_lr_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_min_lr_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
 
-        self.dit_warmup_label = ctk.CTkLabel(self.dyn_frame, text="Warmup Frac:", font=self.bold_font)
-        self.dit_warmup_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
-        self.dit_warmup_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.dit_warmup_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
+        self.lr_sched_label = ctk.CTkLabel(self.dyn_frame, text="LR Curve:", font=self.bold_font)
+        self.lr_sched_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
+        self.lr_sched_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["cosine", "linear"], font=self.huge_font, width=110)
+        self.lr_sched_menu.grid(row=1, column=7, padx=10, pady=10, sticky="w")
 
+        # --- Iteration 2 (warm restart; Epochs 2 = 0 disables it): same columns as iter 1 ---
         self.dyn_epochs2_label = ctk.CTkLabel(self.dyn_frame, text="Epochs 2:", font=self.bold_font)
         self.dyn_epochs2_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
         self.dyn_epochs2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
@@ -216,7 +174,7 @@ class TrainingGUI(ctk.CTk):
 
         self.dyn_lr2_label = ctk.CTkLabel(self.dyn_frame, text="LR 2:", font=self.bold_font)
         self.dyn_lr2_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
-        self.dyn_lr2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_lr2_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
         self.dyn_lr2_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
 
         self.dit_min_lr2_label = ctk.CTkLabel(self.dyn_frame, text="Min LR 2:", font=self.bold_font)
@@ -224,31 +182,79 @@ class TrainingGUI(ctk.CTk):
         self.dit_min_lr2_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
         self.dit_min_lr2_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
 
-        self.precision_label = ctk.CTkLabel(self.dyn_frame, text="Precision:", font=self.bold_font)
-        self.precision_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
-        self.precision_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
-        self.precision_menu.grid(row=5, column=1, padx=10, pady=10, sticky="w")
+        self.lr_sched_2_label = ctk.CTkLabel(self.dyn_frame, text="LR Curve 2:", font=self.bold_font)
+        self.lr_sched_2_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
+        self.lr_sched_2_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["cosine", "linear"], font=self.huge_font, width=110)
+        self.lr_sched_2_menu.grid(row=2, column=7, padx=10, pady=10, sticky="w")
 
-        self.event_weights_label = ctk.CTkLabel(self.dyn_frame, text="Event Oversample:", font=self.bold_font)
-        self.event_weights_label.grid(row=5, column=4, padx=10, pady=10, sticky="e")
-        self.event_weights_menu = ctk.CTkOptionMenu(self.dyn_frame, font=self.huge_font, width=160,
-                                                    values=["off", "0.7,1.5,1.5,2", "0.5,2,2,4", "0.3,2,3,6"])
-        self.event_weights_menu.grid(row=5, column=5, padx=10, pady=10, sticky="w")
+        # --- Shared schedule / optimizer knobs ---
+        self.dit_warmup_label = ctk.CTkLabel(self.dyn_frame, text="Warmup Frac:", font=self.bold_font)
+        self.dit_warmup_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
+        self.dit_warmup_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_warmup_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
 
-        self.tdist_label = ctk.CTkLabel(self.dyn_frame, text="T-Dist:", font=self.bold_font)
-        self.tdist_label.grid(row=6, column=0, padx=10, pady=10, sticky="e")
-        self.tdist_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["logit_normal", "uniform"], font=self.huge_font, width=150)
-        self.tdist_menu.grid(row=6, column=1, padx=10, pady=10, sticky="w")
+        self.dyn_batch_label = ctk.CTkLabel(self.dyn_frame, text="Batch:", font=self.bold_font)
+        self.dyn_batch_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
+        self.dyn_batch_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dyn_batch_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
+
+        self.dyn_wd_label = ctk.CTkLabel(self.dyn_frame, text="Weight Decay:", font=self.bold_font)
+        self.dyn_wd_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
+        self.dyn_wd_entry = ctk.CTkEntry(self.dyn_frame, width=150, font=self.huge_font)
+        self.dyn_wd_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
+
+        self.dit_clip_label = ctk.CTkLabel(self.dyn_frame, text="Grad Clip:", font=self.bold_font)
+        self.dit_clip_label.grid(row=3, column=6, padx=10, pady=10, sticky="e")
+        self.dit_clip_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_clip_entry.grid(row=3, column=7, padx=10, pady=10, sticky="w")
+
+        # --- Architecture ---
+        self.dit_dmodel_label = ctk.CTkLabel(self.dyn_frame, text="DiT Width:", font=self.bold_font)
+        self.dit_dmodel_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        self.dit_dmodel_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_dmodel_entry.grid(row=4, column=1, padx=10, pady=10, sticky="w")
+
+        self.dit_layers_label = ctk.CTkLabel(self.dyn_frame, text="DiT Layers:", font=self.bold_font)
+        self.dit_layers_label.grid(row=4, column=2, padx=10, pady=10, sticky="e")
+        self.dit_layers_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_layers_entry.grid(row=4, column=3, padx=10, pady=10, sticky="w")
+
+        self.dit_heads_label = ctk.CTkLabel(self.dyn_frame, text="DiT Heads:", font=self.bold_font)
+        self.dit_heads_label.grid(row=4, column=4, padx=10, pady=10, sticky="e")
+        self.dit_heads_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.dit_heads_entry.grid(row=4, column=5, padx=10, pady=10, sticky="w")
+
+        self.chunk_len_label = ctk.CTkLabel(self.dyn_frame, text="Chunk Len:", font=self.bold_font)
+        self.chunk_len_label.grid(row=4, column=6, padx=10, pady=10, sticky="e")
+        self.chunk_len_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.chunk_len_entry.grid(row=4, column=7, padx=10, pady=10, sticky="w")
+
+        # --- Objective / regularization ---
+        self.ctx_noise_label = ctk.CTkLabel(self.dyn_frame, text="Ctx Noise:", font=self.bold_font)
+        self.ctx_noise_label.grid(row=5, column=0, padx=10, pady=10, sticky="e")
+        self.ctx_noise_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.ctx_noise_entry.grid(row=5, column=1, padx=10, pady=10, sticky="w")
 
         self.loss_label = ctk.CTkLabel(self.dyn_frame, text="Loss:", font=self.bold_font)
-        self.loss_label.grid(row=6, column=2, padx=10, pady=10, sticky="e")
+        self.loss_label.grid(row=5, column=2, padx=10, pady=10, sticky="e")
         self.loss_menu = ctk.CTkOptionMenu(self.dyn_frame, values=["mse", "huber"], font=self.huge_font, width=100)
-        self.loss_menu.grid(row=6, column=3, padx=10, pady=10, sticky="w")
+        self.loss_menu.grid(row=5, column=3, padx=10, pady=10, sticky="w")
 
         self.huberc_label = ctk.CTkLabel(self.dyn_frame, text="Huber C:", font=self.bold_font)
-        self.huberc_label.grid(row=6, column=4, padx=10, pady=10, sticky="e")
+        self.huberc_label.grid(row=5, column=4, padx=10, pady=10, sticky="e")
         self.huberc_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
-        self.huberc_entry.grid(row=6, column=5, padx=10, pady=10, sticky="w")
+        self.huberc_entry.grid(row=5, column=5, padx=10, pady=10, sticky="w")
+
+        self.ema_decay_label = ctk.CTkLabel(self.dyn_frame, text="EMA Decay:", font=self.bold_font)
+        self.ema_decay_label.grid(row=5, column=6, padx=10, pady=10, sticky="e")
+        self.ema_decay_entry = ctk.CTkEntry(self.dyn_frame, width=80, font=self.huge_font)
+        self.ema_decay_entry.grid(row=5, column=7, padx=10, pady=10, sticky="w")
+
+        # --- Continuation / reuse ---
+        self.dit_continue_label = ctk.CTkLabel(self.dyn_frame, text="Continue:", font=self.bold_font)
+        self.dit_continue_label.grid(row=6, column=0, padx=10, pady=(10, 0), sticky="e")
+        self.dit_continue_switch = ctk.CTkSwitch(self.dyn_frame, text="", onvalue="on", offvalue="off", width=48)
+        self.dit_continue_switch.grid(row=6, column=1, padx=10, pady=(10, 0), sticky="w")
 
         self.dit_label = ctk.CTkLabel(self.dyn_frame, text="Reuse DiT:", font=self.bold_font)
         self.dit_label.grid(row=7, column=0, padx=10, pady=10, sticky="e")
@@ -256,69 +262,6 @@ class TrainingGUI(ctk.CTk):
         self.dit_entry.grid(row=7, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
         self.dit_browse_button = ctk.CTkButton(self.dyn_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_dit)
         self.dit_browse_button.grid(row=7, column=7, padx=10, pady=10)
-
-        self.dec_frame = ctk.CTkFrame(dec_tab)
-        self.dec_frame.pack(pady=10, padx=10, fill="x")
-
-        self.dec_section_label = ctk.CTkLabel(self.dec_frame, text="Decoder Training (Phase 3)", font=self.bold_font)
-        self.dec_section_label.grid(row=0, column=0, columnspan=8, padx=10, pady=(10, 0), sticky="w")
-
-        self.dec_epochs_label = ctk.CTkLabel(self.dec_frame, text="Epochs:", font=self.bold_font)
-        self.dec_epochs_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.dec_epochs_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_epochs_entry.grid(row=1, column=1, padx=10, pady=10, sticky="w")
-
-        self.dec_lr_label = ctk.CTkLabel(self.dec_frame, text="Learn Rate:", font=self.bold_font)
-        self.dec_lr_label.grid(row=1, column=2, padx=10, pady=10, sticky="e")
-        self.dec_lr_entry = ctk.CTkEntry(self.dec_frame, width=100, font=self.huge_font)
-        self.dec_lr_entry.grid(row=1, column=3, padx=10, pady=10, sticky="w")
-
-        self.dec_lpips_label = ctk.CTkLabel(self.dec_frame, text="LPIPS Weight:", font=self.bold_font)
-        self.dec_lpips_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
-        self.dec_lpips_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_lpips_entry.grid(row=1, column=5, padx=10, pady=10, sticky="w")
-
-        self.dec_clip_label = ctk.CTkLabel(self.dec_frame, text="Grad Clip:", font=self.bold_font)
-        self.dec_clip_label.grid(row=1, column=6, padx=10, pady=10, sticky="e")
-        self.dec_clip_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_clip_entry.grid(row=1, column=7, padx=10, pady=10, sticky="w")
-
-        self.dec_rollout_label = ctk.CTkLabel(self.dec_frame, text="Rollout K:", font=self.bold_font)
-        self.dec_rollout_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
-        self.dec_rollout_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_rollout_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
-
-        self.dec_clean_label = ctk.CTkLabel(self.dec_frame, text="Clean Frac:", font=self.bold_font)
-        self.dec_clean_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
-        self.dec_clean_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_clean_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
-
-        self.dec_res3_label = ctk.CTkLabel(self.dec_frame, text="ResBlocks:", font=self.bold_font)
-        self.dec_res3_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
-        self.dec_res3_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_res3_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
-
-        self.dec_trajs_label = ctk.CTkLabel(self.dec_frame, text="Train Trajs:", font=self.bold_font)
-        self.dec_trajs_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
-        self.dec_trajs_entry = ctk.CTkEntry(self.dec_frame, width=80, font=self.huge_font)
-        self.dec_trajs_entry.grid(row=2, column=7, padx=10, pady=10, sticky="w")
-
-        self.dec_lpips_net_label = ctk.CTkLabel(self.dec_frame, text="LPIPS Net:", font=self.bold_font)
-        self.dec_lpips_net_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.dec_lpips_net_menu = ctk.CTkOptionMenu(self.dec_frame, values=["alex", "vgg"], font=self.huge_font, width=100)
-        self.dec_lpips_net_menu.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-
-        self.dec_precision_label = ctk.CTkLabel(self.dec_frame, text="Precision:", font=self.bold_font)
-        self.dec_precision_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
-        self.dec_precision_menu = ctk.CTkOptionMenu(self.dec_frame, values=["bf16", "fp16", "fp32"], font=self.huge_font, width=100)
-        self.dec_precision_menu.grid(row=3, column=3, padx=10, pady=10, sticky="w")
-
-        self.dec_ckpt_label = ctk.CTkLabel(self.dec_frame, text="Reuse Dec:", font=self.bold_font)
-        self.dec_ckpt_label.grid(row=4, column=0, padx=10, pady=10, sticky="e")
-        self.dec_ckpt_entry = ctk.CTkEntry(self.dec_frame, width=400, font=self.huge_font, placeholder_text="path to autoencoder_final.pth (blank = train Phase 3)")
-        self.dec_ckpt_entry.grid(row=4, column=1, columnspan=6, padx=10, pady=10, sticky="ew")
-        self.dec_ckpt_browse_button = ctk.CTkButton(self.dec_frame, text="Browse", width=80, font=self.bold_font, command=self._browse_dec)
-        self.dec_ckpt_browse_button.grid(row=4, column=7, padx=10, pady=10)
 
         self.eval_frame = ctk.CTkFrame(eval_tab)
         self.eval_frame.pack(pady=10, padx=10, fill="x")
@@ -361,6 +304,11 @@ class TrainingGUI(ctk.CTk):
         self.eval_gif_len_entry = ctk.CTkEntry(self.eval_frame, width=80, font=self.huge_font)
         self.eval_gif_len_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
 
+        self.coll_eval_label = ctk.CTkLabel(self.eval_frame, text="CollEval:", font=self.bold_font)
+        self.coll_eval_label.grid(row=2, column=6, padx=10, pady=10, sticky="e")
+        self.coll_eval_menu = ctk.CTkOptionMenu(self.eval_frame, values=["on", "off"], font=self.huge_font, width=100)
+        self.coll_eval_menu.grid(row=2, column=7, padx=10, pady=10, sticky="w")
+
         self.actions_frame = ctk.CTkFrame(self)
         self.actions_frame.pack(pady=(0, 5), padx=20, fill="x")
         self.actions_frame.grid_columnconfigure(0, weight=1)
@@ -372,63 +320,11 @@ class TrainingGUI(ctk.CTk):
         self.start_button = ctk.CTkButton(self.actions_frame, text="START TRAINING", font=self.bold_font, fg_color="green", hover_color="darkgreen", command=self.start_training_thread)
         self.start_button.grid(row=0, column=2, padx=20, pady=10)
 
-        self.datagen_frame = ctk.CTkFrame(self.tabview.tab("Data"))
-        self.datagen_frame.pack(pady=10, padx=10, fill="x")
-
-        self.datagen_title = ctk.CTkLabel(self.datagen_frame, text="Generate a dataset (saved to data/<name>; regenerating replaces it)", font=self.bold_font)
-        self.datagen_title.grid(row=0, column=0, columnspan=6, padx=10, pady=(10, 0), sticky="w")
-
-        self.dataname_label = ctk.CTkLabel(self.datagen_frame, text="Name:", font=self.bold_font)
-        self.dataname_label.grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.dataname_entry = ctk.CTkEntry(self.datagen_frame, width=150, font=self.huge_font)
-        self.dataname_entry.grid(row=1, column=1, columnspan=3, padx=10, pady=10, sticky="w")
-
-        self.supersample_label = ctk.CTkLabel(self.datagen_frame, text="Supersample:", font=self.bold_font)
-        self.supersample_label.grid(row=1, column=4, padx=10, pady=10, sticky="e")
-        self.supersample_menu = ctk.CTkOptionMenu(self.datagen_frame, values=["1", "2", "4"], font=self.huge_font, width=80)
-        self.supersample_menu.grid(row=1, column=5, padx=10, pady=10, sticky="w")
-
-        self.res_label = ctk.CTkLabel(self.datagen_frame, text="Resolution:", font=self.bold_font)
-        self.res_label.grid(row=2, column=0, padx=10, pady=10, sticky="e")
-        self.res_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.res_entry.grid(row=2, column=1, padx=10, pady=10, sticky="w")
-
-        self.balls_min_label = ctk.CTkLabel(self.datagen_frame, text="Balls Min:", font=self.bold_font)
-        self.balls_min_label.grid(row=2, column=2, padx=10, pady=10, sticky="e")
-        self.balls_min_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.balls_min_entry.grid(row=2, column=3, padx=10, pady=10, sticky="w")
-
-        self.speed_min_label = ctk.CTkLabel(self.datagen_frame, text="Speed Min:", font=self.bold_font)
-        self.speed_min_label.grid(row=2, column=4, padx=10, pady=10, sticky="e")
-        self.speed_min_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.speed_min_entry.grid(row=2, column=5, padx=10, pady=10, sticky="w")
-
-        self.traj_label = ctk.CTkLabel(self.datagen_frame, text="Trajectories:", font=self.bold_font)
-        self.traj_label.grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.traj_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.traj_entry.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-
-        self.balls_max_label = ctk.CTkLabel(self.datagen_frame, text="Balls Max:", font=self.bold_font)
-        self.balls_max_label.grid(row=3, column=2, padx=10, pady=10, sticky="e")
-        self.balls_max_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.balls_max_entry.grid(row=3, column=3, padx=10, pady=10, sticky="w")
-
-        self.speed_max_label = ctk.CTkLabel(self.datagen_frame, text="Speed Max:", font=self.bold_font)
-        self.speed_max_label.grid(row=3, column=4, padx=10, pady=10, sticky="e")
-        self.speed_max_entry = ctk.CTkEntry(self.datagen_frame, width=80, font=self.huge_font)
-        self.speed_max_entry.grid(row=3, column=5, padx=10, pady=10, sticky="w")
-
-        self.generate_button = ctk.CTkButton(self.datagen_frame, text="Generate Data", font=self.bold_font, command=self.start_generation)
-        self.generate_button.grid(row=4, column=0, columnspan=3, pady=10)
-        self.datagen_status = ctk.CTkLabel(self.datagen_frame, text="idle", font=self.huge_font)
-        self.datagen_status.grid(row=4, column=3, columnspan=3, pady=10)
-
         self.log_textbox = ctk.CTkTextbox(self, width=1100, height=380, font=self.huge_font)
         self.log_textbox.pack(pady=10, padx=20, fill="both", expand=True)
 
         self.current_log_file = None
         self.is_training = False
-        self.is_generating = False
         self.last_read_pos = 0
 
         self.load_settings()
@@ -461,68 +357,6 @@ class TrainingGUI(ctk.CTk):
             self.dit_entry.delete(0, "end")
             self.dit_entry.insert(0, path)
 
-    def _browse_dec(self):
-        path = filedialog.askopenfilename(title="Select autoencoder_final.pth",
-                                          filetypes=[("PyTorch checkpoint", "*.pth"), ("All files", "*.*")])
-        if path:
-            self.dec_ckpt_entry.delete(0, "end")
-            self.dec_ckpt_entry.insert(0, path)
-
-    def start_generation(self):
-        if self.is_training or self.is_generating:
-            return
-        try:
-            name = self.dataname_entry.get().strip()
-            res = int(self.res_entry.get())
-            n_traj = int(self.traj_entry.get())
-            bmin, bmax = int(self.balls_min_entry.get()), int(self.balls_max_entry.get())
-            smin, smax = float(self.speed_min_entry.get()), float(self.speed_max_entry.get())
-            ss = int(self.supersample_menu.get())
-        except ValueError:
-            self.log_textbox.insert("end", "[Error] Data-generation fields must be valid numbers!\n")
-            return
-        if not name or name in (".", "..") or "/" in name or "\\" in name:
-            self.log_textbox.insert("end", "[Error] Dataset name must be a non-empty plain folder name.\n")
-            return
-        if res % 8 != 0:
-            self.log_textbox.insert("end", f"[Error] Resolution must be a multiple of 8 (got {res}).\n")
-            return
-        if bmin < 1 or bmax < bmin:
-            self.log_textbox.insert("end", "[Error] Require 1 <= Balls Min <= Balls Max.\n")
-            return
-
-        data_dir = os.path.join("data", name)
-        self.is_generating = True
-        self.generate_button.configure(state="disabled", text="Generating...")
-        self.log_textbox.insert("end", f"[System] Generating {n_traj} trajectories ({res}x{res}) into {data_dir} ...\n")
-        self.log_textbox.see("end")
-        threading.Thread(target=self._run_generation,
-                         args=(data_dir, n_traj, res, bmin, bmax, smin, smax, ss), daemon=True).start()
-
-    def _run_generation(self, data_dir, n_traj, res, bmin, bmax, smin, smax, ss):
-        def cb(done, total):
-            self.after(0, lambda d=done, t=total: self.datagen_status.configure(text=f"{d}/{t}"))
-        try:
-            if os.path.isdir(data_dir):
-                shutil.rmtree(data_dir)
-                self.after(0, lambda: self.log_textbox.insert("end", f"[System] Removed existing dataset at {data_dir}.\n"))
-            generate_bouncing_data(data_dir=data_dir, n_trajectories=n_traj, width=res, height=res,
-                                   n_balls_min=bmin, n_balls_max=bmax, speed_min=smin, speed_max=smax,
-                                   supersample=ss, progress_cb=cb)
-            self.after(0, lambda: self._on_generation_done(data_dir, n_traj))
-        except Exception as e:
-            self.after(0, lambda err=e: self.log_textbox.insert("end", f"[Error] Generation failed: {err}\n"))
-            self.after(0, lambda: self.generate_button.configure(state="normal", text="Generate Data"))
-            self.is_generating = False
-
-    def _on_generation_done(self, data_dir, n_traj):
-        self.is_generating = False
-        self.generate_button.configure(state="normal", text="Generate Data")
-        self.datagen_status.configure(text="Done")
-        self.log_textbox.insert("end", f"[System] Generated {n_traj} trajectories in {data_dir}.\n")
-        self.log_textbox.see("end")
-        self._set_env(os.path.basename(data_dir))
-
     @staticmethod
     def _set_entry(entry, value):
         entry.delete(0, "end")
@@ -553,7 +387,6 @@ class TrainingGUI(ctk.CTk):
                 self.ae_kl_entry.delete(0, "end"); self.ae_kl_entry.insert(0, str(c.get("ae_kl_weight", 0.005)))
                 self.lpips_entry.delete(0, "end"); self.lpips_entry.insert(0, str(c.get("ae_lpips_weight", 0.0)))
                 self.ae_lpips_net_menu.set(c.get("ae_lpips_net", "alex"))
-                self.dec_lpips_net_menu.set(c.get("dec_lpips_net", "alex"))
                 self.latent_grid_entry.delete(0, "end"); self.latent_grid_entry.insert(0, str(c.get("latent_grid", 8)))
                 self.latent_ch_entry.delete(0, "end"); self.latent_ch_entry.insert(0, str(c.get("latent_ch", 32)))
                 self.dit_dmodel_entry.delete(0, "end"); self.dit_dmodel_entry.insert(0, str(c.get("dit_d_model", 256)))
@@ -572,37 +405,24 @@ class TrainingGUI(ctk.CTk):
                 self.ctx_noise_entry.delete(0, "end"); self.ctx_noise_entry.insert(0, str(c.get("dit_context_noise", 0.0)))
                 _cm = str(c.get("compile", c.get("dit_compile", "off")))
                 self.compile_menu.set("off" if _cm in ("off", "") else "on")
-                self.precision_menu.set(c.get("dit_precision", "bf16"))
-                self.ae_precision_menu.set(c.get("ae_precision", "bf16"))
-                self.dec_precision_menu.set(c.get("dec_precision", "bf16"))
-                self.event_weights_menu.set(str(c.get("dit_event_weights", "off")) or "off")
-                self.tdist_menu.set(c.get("dit_t_dist", "logit_normal"))
+                self.coll_eval_menu.set(c.get("coll_eval", "on"))
                 self.loss_menu.set(c.get("dit_loss", "mse"))
                 self.huberc_entry.delete(0, "end"); self.huberc_entry.insert(0, str(c.get("dit_huber_c", 1.0)))
                 self.ae_clip_entry.delete(0, "end"); self.ae_clip_entry.insert(0, str(c.get("ae_grad_clip", 10.0)))
                 self.dec_res_entry.delete(0, "end"); self.dec_res_entry.insert(0, str(c.get("vae_dec_res_blocks", 1)))
                 self.enc_res_entry.delete(0, "end"); self.enc_res_entry.insert(0, str(c.get("vae_enc_res_blocks", 1)))
-                self.dec_res3_entry.delete(0, "end"); self.dec_res3_entry.insert(0, str(c.get("dec_res_blocks", 1)))
-                self.dec_trajs_entry.delete(0, "end"); self.dec_trajs_entry.insert(0, str(c.get("dec_n_train_traj", 1000)))
+                self.ae_base_ch_entry.delete(0, "end"); self.ae_base_ch_entry.insert(0, str(c.get("vae_base_ch", 64)))
+                self.ae_block_menu.set(c.get("vae_block", "res"))
                 self.dit_clip_entry.delete(0, "end"); self.dit_clip_entry.insert(0, str(c.get("dit_grad_clip", 3.0)))
-                self.dec_clip_entry.delete(0, "end"); self.dec_clip_entry.insert(0, str(c.get("dec_grad_clip", 10.0)))
-                self.dec_epochs_entry.delete(0, "end"); self.dec_epochs_entry.insert(0, str(c.get("dec_epochs", 0)))
-                self.dec_lr_entry.delete(0, "end"); self.dec_lr_entry.insert(0, str(c.get("dec_learning_rate", 0.0001)))
-                self.dec_lpips_entry.delete(0, "end"); self.dec_lpips_entry.insert(0, str(c.get("dec_lpips_weight", 1.0)))
-                self.dec_rollout_entry.delete(0, "end"); self.dec_rollout_entry.insert(0, str(c.get("dec_rollout_k", 5)))
-                self.dec_clean_entry.delete(0, "end"); self.dec_clean_entry.insert(0, str(c.get("dec_clean_frac", 0.3)))
                 self.seed_entry.delete(0, "end"); self.seed_entry.insert(0, str(c.get("seed", "42")))
                 self._set_entry(self.ae_entry, str(c.get("ae_checkpoint", "")))
                 self._set_entry(self.dit_entry, str(c.get("dit_checkpoint", "")))
-                self._set_entry(self.dec_ckpt_entry, str(c.get("dec_checkpoint", "")))
-                self.dataname_entry.delete(0, "end"); self.dataname_entry.insert(0, str(c.get("datagen_name", c.get("env_name", "bouncing"))))
-                self.res_entry.delete(0, "end"); self.res_entry.insert(0, str(c.get("resolution", 64)))
-                self.traj_entry.delete(0, "end"); self.traj_entry.insert(0, str(c.get("n_trajectories", 5000)))
-                self.balls_min_entry.delete(0, "end"); self.balls_min_entry.insert(0, str(c.get("n_balls_min", 1)))
-                self.balls_max_entry.delete(0, "end"); self.balls_max_entry.insert(0, str(c.get("n_balls_max", 5)))
-                self.speed_min_entry.delete(0, "end"); self.speed_min_entry.insert(0, str(c.get("speed_min", 3.0)))
-                self.speed_max_entry.delete(0, "end"); self.speed_max_entry.insert(0, str(c.get("speed_max", 8.0)))
-                self.supersample_menu.set(str(c.get("datagen_supersample", 1)))
+                self.lr_sched_menu.set(c.get("dit_lr_schedule", "cosine"))
+                self.lr_sched_2_menu.set(c.get("dit_lr_schedule_2", "cosine"))
+                if str(c.get("dit_continue", "off")).lower() in ("on", "true", "1"):
+                    self.dit_continue_switch.select()
+                else:
+                    self.dit_continue_switch.deselect()
                 self.log_textbox.insert("end", f"[System] Settings loaded from {CONFIG_FILE}\n")
             except Exception as e:
                 self.log_textbox.insert("end", f"[Error] Load config failed: {e}\n")
@@ -619,7 +439,6 @@ class TrainingGUI(ctk.CTk):
             self.ae_kl_entry.insert(0, "0.005")
             self.lpips_entry.insert(0, "1.0")
             self.ae_lpips_net_menu.set("alex")
-            self.dec_lpips_net_menu.set("alex")
             self.latent_grid_entry.insert(0, "8")
             self.latent_ch_entry.insert(0, "32")
             self.dit_dmodel_entry.insert(0, "256")
@@ -637,32 +456,17 @@ class TrainingGUI(ctk.CTk):
             self.ema_decay_entry.insert(0, "0.999")
             self.ctx_noise_entry.insert(0, "0.0")
             self.compile_menu.set("off")
-            self.precision_menu.set("bf16")
-            self.ae_precision_menu.set("bf16")
-            self.dec_precision_menu.set("bf16")
-            self.event_weights_menu.set("off")
-            self.tdist_menu.set("logit_normal")
             self.loss_menu.set("mse")
+            self.lr_sched_menu.set("cosine")
+            self.lr_sched_2_menu.set("cosine")
+            self.dit_continue_switch.deselect()
             self.huberc_entry.insert(0, "1.0")
             self.ae_clip_entry.insert(0, "10.0")
             self.dit_clip_entry.insert(0, "3.0")
-            self.dec_clip_entry.insert(0, "10.0")
             self.dec_res_entry.insert(0, "1")
             self.enc_res_entry.insert(0, "1")
-            self.dec_res3_entry.insert(0, "1")
-            self.dec_trajs_entry.insert(0, "1000")
-            self.dec_epochs_entry.insert(0, "0")
-            self.dec_lr_entry.insert(0, "0.0005")
-            self.dec_lpips_entry.insert(0, "1.0")
-            self.dec_rollout_entry.insert(0, "5")
-            self.dec_clean_entry.insert(0, "0.3")
-            self.dataname_entry.insert(0, "bouncing")
-            self.res_entry.insert(0, "64")
-            self.traj_entry.insert(0, "5000")
-            self.balls_min_entry.insert(0, "1")
-            self.balls_max_entry.insert(0, "5")
-            self.speed_min_entry.insert(0, "3.0")
-            self.speed_max_entry.insert(0, "8.0")
+            self.ae_base_ch_entry.insert(0, "64")
+            self.ae_block_menu.set("res")
 
     def save_settings(self):
         try:
@@ -684,7 +488,6 @@ class TrainingGUI(ctk.CTk):
                 "ae_kl_weight": float(self.ae_kl_entry.get()),
                 "ae_lpips_weight": float(self.lpips_entry.get()),
                 "ae_lpips_net": self.ae_lpips_net_menu.get(),
-                "dec_lpips_net": self.dec_lpips_net_menu.get(),
                 "latent_grid": int(self.latent_grid_entry.get()),
                 "latent_ch": int(self.latent_ch_entry.get()),
                 "dit_d_model": int(self.dit_dmodel_entry.get()),
@@ -699,40 +502,24 @@ class TrainingGUI(ctk.CTk):
                 "eval_n_pngs": int(self.eval_png_entry.get()),
                 "eval_n_gifs": int(self.eval_gifs_entry.get()),
                 "eval_gif_len": int(self.eval_gif_len_entry.get()),
+                "coll_eval": self.coll_eval_menu.get(),
                 "dit_ema_decay": float(self.ema_decay_entry.get()),
                 "dit_context_noise": float(self.ctx_noise_entry.get()),
                 "compile": self.compile_menu.get(),
-                "dit_precision": self.precision_menu.get(),
-                "ae_precision": self.ae_precision_menu.get(),
-                "dec_precision": self.dec_precision_menu.get(),
-                "dit_event_weights": self.event_weights_menu.get(),
-                "dit_t_dist": self.tdist_menu.get(),
                 "dit_loss": self.loss_menu.get(),
                 "dit_huber_c": float(self.huberc_entry.get()),
                 "ae_grad_clip": float(self.ae_clip_entry.get()),
                 "dit_grad_clip": float(self.dit_clip_entry.get()),
-                "dec_grad_clip": float(self.dec_clip_entry.get()),
                 "vae_dec_res_blocks": int(self.dec_res_entry.get()),
                 "vae_enc_res_blocks": int(self.enc_res_entry.get()),
-                "dec_res_blocks": int(self.dec_res3_entry.get()),
-                "dec_n_train_traj": int(self.dec_trajs_entry.get()),
-                "dec_epochs": int(self.dec_epochs_entry.get()),
-                "dec_learning_rate": float(self.dec_lr_entry.get()),
-                "dec_lpips_weight": float(self.dec_lpips_entry.get()),
-                "dec_rollout_k": int(self.dec_rollout_entry.get()),
-                "dec_clean_frac": float(self.dec_clean_entry.get()),
+                "vae_base_ch": int(self.ae_base_ch_entry.get()),
+                "vae_block": self.ae_block_menu.get(),
                 "seed": self.seed_entry.get().strip(),
                 "ae_checkpoint": self.ae_entry.get().strip(),
                 "dit_checkpoint": self.dit_entry.get().strip(),
-                "dec_checkpoint": self.dec_ckpt_entry.get().strip(),
-                "datagen_name": self.dataname_entry.get().strip(),
-                "resolution": int(self.res_entry.get()),
-                "n_trajectories": int(self.traj_entry.get()),
-                "n_balls_min": int(self.balls_min_entry.get()),
-                "n_balls_max": int(self.balls_max_entry.get()),
-                "speed_min": float(self.speed_min_entry.get()),
-                "speed_max": float(self.speed_max_entry.get()),
-                "datagen_supersample": int(self.supersample_menu.get())
+                "dit_lr_schedule": self.lr_sched_menu.get(),
+                "dit_lr_schedule_2": self.lr_sched_2_menu.get(),
+                "dit_continue": self.dit_continue_switch.get(),
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=4)
@@ -744,7 +531,7 @@ class TrainingGUI(ctk.CTk):
             return None
 
     def start_training_thread(self):
-        if self.is_training or self.is_generating: return
+        if self.is_training: return
         config = self.save_settings()
         if not config: return
             
@@ -764,38 +551,32 @@ class TrainingGUI(ctk.CTk):
             ae_epochs=c['ae_epochs'], dyn_epochs=c['dyn_epochs'],
             ae_learning_rate=c['ae_learning_rate'], ae_weight_decay=c['ae_weight_decay'],
             ae_kl_weight=c.get('ae_kl_weight', 0.005), ae_lpips_weight=c.get('ae_lpips_weight', 0.0),
-            ae_lpips_net=c.get('ae_lpips_net', 'alex'), dec_lpips_net=c.get('dec_lpips_net', 'alex'),
+            ae_lpips_net=c.get('ae_lpips_net', 'alex'),
             dyn_learning_rate=c['dyn_learning_rate'], dit_min_lr=c.get('dit_min_lr', 1e-6),
             dit_warmup_frac=c.get('dit_warmup_frac', 0.05),
+            dit_lr_schedule=c.get('dit_lr_schedule', "cosine"),
+            dit_lr_schedule_2=c.get('dit_lr_schedule_2', "cosine"),
             dyn_epochs_2=c.get('dyn_epochs_2', 0), dyn_learning_rate_2=c.get('dyn_learning_rate_2', 2e-4),
             dit_min_lr_2=c.get('dit_min_lr_2', 2e-6),
             dyn_weight_decay=c['dyn_weight_decay'],
             eval_horizon=c.get('eval_horizon', 50), eval_max_batches=c.get('eval_max_batches', 24),
             seed=(c.get('seed') or None), ae_checkpoint=c.get('ae_checkpoint', ""),
             dit_checkpoint=c.get('dit_checkpoint', ""),
+            dit_continue=(str(c.get('dit_continue', "off")).lower() in ("on", "true", "1")),
             latent_grid=c.get('latent_grid', 8), latent_ch=c.get('latent_ch', 32),
             vae_enc_res_blocks=c.get('vae_enc_res_blocks', 1),
+            vae_base_ch=c.get('vae_base_ch', 64),
+            vae_block=c.get('vae_block', 'res'),
             vae_dec_res_blocks=c.get('vae_dec_res_blocks', 1),
-            dec_res_blocks=c.get('dec_res_blocks', 1),
-            dec_n_train_traj=c.get('dec_n_train_traj', 1000),
-            dec_checkpoint=c.get('dec_checkpoint', ""),
             chunk_len=c.get('chunk_len', 5), eval_best_of_n=c.get('eval_best_of_n', 1),
             eval_n_pngs=c.get('eval_n_pngs', 1), eval_n_gifs=c.get('eval_n_gifs', 2),
             eval_gif_len=c.get('eval_gif_len', 40),
+            coll_eval=c.get('coll_eval', "on"),
             dit_ema_decay=c.get('dit_ema_decay', 0.999),
             dit_context_noise=c.get('dit_context_noise', 0.0),
             compile_mode=c.get('compile', "off"),
-            dit_precision=c.get('dit_precision', "bf16"),
-            ae_precision=c.get('ae_precision', "bf16"),
-            dec_precision=c.get('dec_precision', "bf16"),
-            dit_event_weights=c.get('dit_event_weights', "off"),
-            dit_t_dist=c.get('dit_t_dist', "logit_normal"),
             dit_loss=c.get('dit_loss', "mse"), dit_huber_c=c.get('dit_huber_c', 1.0),
             ae_grad_clip=c.get('ae_grad_clip', 10.0), dit_grad_clip=c.get('dit_grad_clip', 3.0),
-            dec_grad_clip=c.get('dec_grad_clip', 10.0),
-            dec_epochs=c.get('dec_epochs', 0), dec_learning_rate=c.get('dec_learning_rate', 5e-4),
-            dec_lpips_weight=c.get('dec_lpips_weight', 1.0), dec_rollout_k=c.get('dec_rollout_k', 5),
-            dec_clean_frac=c.get('dec_clean_frac', 0.3),
             dit_d_model=c.get('dit_d_model', 256), dit_n_layers=c.get('dit_n_layers', 6),
             dit_n_heads=c.get('dit_n_heads', 8), inference_steps=c.get('inference_steps', 10)
         )
