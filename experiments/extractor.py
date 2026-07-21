@@ -73,12 +73,10 @@ def extract_frame(img, res_tol=80.0, a_seed=0.3, min_area=15.0, return_pixels=Fa
     return dets
 
 
-def _split_detection(det, k, seeds_world=None):
-    xs, ys, ww = det["px"]
-    pts = np.stack([xs, ys], 1).astype(np.float64)
-    if seeds_world is not None and len(seeds_world) == k:
-        centers = np.array([[sx - 0.5, (WORLD - 0.5) - sy] for sx, sy in seeds_world])
-    else:
+def _weighted_kmeans(pts, ww, k, centers=None):
+    """Lloyd iterations on weighted pixels (farthest-point init); returns per-part
+    (points, weights) subsets. Shared by detection splitting and ball counting."""
+    if centers is None:
         i0 = int(np.argmax(ww))
         centers = [pts[i0]]
         while len(centers) < k:
@@ -93,10 +91,65 @@ def _split_detection(det, k, seeds_world=None):
             m = assign == j
             if m.any():
                 centers[j] = (pts[m] * ww[m, None]).sum(0) / ww[m].sum()
+    return [(pts[assign == j], ww[assign == j]) for j in range(k)], centers
+
+
+def _radial_extent_ratio(pts, ww):
+    """Weighted p99.5 pixel distance from the centroid, over the equivalent-area circle
+    radius. ~1.0 for a single rendered ball; >>1 for same-material balls in contact."""
+    area = float(ww.sum())
+    if area <= 0:
+        return 0.0, 0.0
+    c = (pts * ww[:, None]).sum(0) / area
+    d = np.sqrt(((pts - c) ** 2).sum(1))
+    order = np.argsort(d)
+    cw = np.cumsum(ww[order])
+    d99 = d[order[min(np.searchsorted(cw, 0.995 * cw[-1]), len(order) - 1)]]
+    r_eq = math.sqrt(area / math.pi)
+    return d99 / max(r_eq, 1e-6), r_eq
+
+
+def _count_balls(det, max_k=4):
+    """How many balls does this detection cover? Same-material balls that stay in contact
+    form ONE connected component, so counting components undercounts the inventory. Area
+    cannot discriminate (two r=5 balls ~ one r=7 ball), but shape can: a single ball is a
+    filled circle (radial extent ~ its equivalent-area radius), while k tangent balls are
+    elongated. If elongated, accept the smallest k whose k-means parts each look like a
+    plausible ball; otherwise count 1 (never invent balls a split cannot justify)."""
+    if "px" not in det:
+        return 1
+    xs, ys, ww = det["px"]
+    pts = np.stack([xs, ys], 1).astype(np.float64)
+    ratio, _ = _radial_extent_ratio(pts, ww)
+    if ratio <= 1.15:
+        return 1
+    for k in range(2, max_k + 1):
+        if det["area"] < k * math.pi * 3.5 ** 2:
+            break
+        parts, _ = _weighted_kmeans(pts, ww, k)
+        if len(parts) != k:
+            continue
+        ok = True
+        for pp, pw in parts:
+            rr, re = _radial_extent_ratio(pp, pw)
+            if not (3.8 <= re <= 9.2 and rr <= 1.3):
+                ok = False
+                break
+        if ok:
+            return k
+    return 1
+
+
+def _split_detection(det, k, seeds_world=None):
+    xs, ys, ww = det["px"]
+    pts = np.stack([xs, ys], 1).astype(np.float64)
+    centers = None
+    if seeds_world is not None and len(seeds_world) == k:
+        centers = np.array([[sx - 0.5, (WORLD - 0.5) - sy] for sx, sy in seeds_world])
+    part_px, centers = _weighted_kmeans(pts, ww, k, centers=centers)
     parts = []
-    for j in range(k):
-        m = assign == j
-        area = float(ww[m].sum())
+    for j, (pp, pw) in enumerate(part_px):
+        area = float(pw.sum())
         if area <= 0:
             continue
         parts.append({"mat": det["mat"], "x": centers[j, 0] + 0.5,
@@ -114,9 +167,19 @@ def _track_material(dets_seq, k, gate, coast_gate):
 
     t0 = next((t for t, d in enumerate(dets_seq) if len(d) >= k), None)
     if t0 is None:
+        # never k separate detections (same-material balls in contact the whole trajectory):
+        # split the largest detection at the best frame instead of dropping tracks
         t0 = int(np.argmax([len(d) for d in dets_seq]))
-        k = len(dets_seq[t0])
-        pos, valid, merged, rad = pos[:, :k], valid[:, :k], merged[:, :k], rad[:, :k]
+        dets0 = list(dets_seq[t0])
+        big = max(dets0, key=lambda d: d["area"]) if dets0 else None
+        if big is not None and "px" in big:
+            dets0.remove(big)
+            dets0.extend(_split_detection(big, k - len(dets0)))
+            dets_seq = list(dets_seq)
+            dets_seq[t0] = dets0
+        else:
+            k = len(dets_seq[t0])
+            pos, valid, merged, rad = pos[:, :k], valid[:, :k], merged[:, :k], rad[:, :k]
     init = sorted(dets_seq[t0], key=lambda d: -d["area"])[:k]
     for i, d in enumerate(init):
         pos[t0, i] = (d["x"], d["y"])
@@ -188,7 +251,8 @@ def extract_states(frames, inventory=None, gate=10.0, coast_gate=4.0,
         inventory = {}
         min_persist = max(3, T // 20)
         for m in MAT_NAMES:
-            counts = np.array([sum(d["mat"] == m for d in dets) for dets in dets_all])
+            counts = np.array([sum(_count_balls(d) for d in dets if d["mat"] == m)
+                               for dets in dets_all])
             km = 0
             for c in range(1, int(counts.max(initial=0)) + 1):
                 if (counts >= c).sum() >= min_persist:
