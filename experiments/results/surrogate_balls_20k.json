@@ -1,0 +1,10 @@
+{
+  "runs/2026_07_15__10_42_42__bouncing_10k_b25_flow": {
+    "config": "enc1/dec1/ch32",
+    "trained_on": "data/bouncing_10k_b25",
+    "latent_scale": 6.277063369750977,
+    "latent_r2": 0.9886788211169032,
+    "surrogate_psnr": 26.37772609269654,
+    "recon_psnr": 31.345538736444563
+  }
+}

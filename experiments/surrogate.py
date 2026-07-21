@@ -28,6 +28,7 @@ def load_ae(run_dir, device):
     with open(os.path.join(run_dir, "run_config.json")) as f:
         cfg = json.load(f)
     ae = CNNVAE(latent_ch=cfg["latent_ch"], latent_grid=cfg["latent_grid"],
+                base_ch=cfg.get("vae_base_ch", 64), block=cfg.get("vae_block", "res"),
                 enc_res_blocks=cfg["vae_enc_res_blocks"],
                 dec_res_blocks=cfg["vae_dec_res_blocks"]).to(device)
     ae.load_state_dict(torch.load(os.path.join(run_dir, "autoencoder.pth"),
