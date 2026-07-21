@@ -1,7 +1,16 @@
 import os
 import glob
 import numpy as np
+import mmap as _mmap
 import torch
+
+# Read-only mmap of big caches must be MAP_SHARED: a MAP_PRIVATE mapping reserves
+# copy-on-write commit for its full size and ENOMEMs when the file (66 GB full-mix
+# cache) exceeds RAM+swap. We never write into loaded caches, so shared is safe.
+try:
+    torch.serialization.set_default_mmap_options(_mmap.MAP_SHARED)
+except Exception:
+    pass
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
@@ -67,14 +76,15 @@ class FrameCache:
                     torch.save({"frames": frames, "ranges": ranges, "sig": sig}, disk_cache_path)
                     print(f"[Cache] Saved frame cache to {disk_cache_path} "
                           f"({frames.shape[0]} frames, {frames.numel() / 1e9:.2f} GB).")
-                    del frames
                     blob = torch.load(disk_cache_path, map_location="cpu", weights_only=True, mmap=True)
                     frames, ranges = blob["frames"], blob["ranges"]
                     print("[Cache] Re-opened as memory-map; decoded tensor released from RAM.")
+                    if scratch and os.path.exists(scratch):
+                        os.remove(scratch)
                 except Exception as e:
-                    print(f"[Cache] Could not save cache to {disk_cache_path}: {e}")
-            if scratch and os.path.exists(scratch):
-                os.remove(scratch)
+                    # keep the decoded tensor (and its scratch backing, if any) --
+                    # slower next start, never a crash
+                    print(f"[Cache] Cache save/reload failed ({e}) -- using the decoded tensor directly.")
 
         self.sig = sig
         self.ranges = ranges
