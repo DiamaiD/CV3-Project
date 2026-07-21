@@ -116,7 +116,7 @@ class Upsample(nn.Module):
 class CNNVAE(nn.Module):
     def __init__(self, latent_ch=32, latent_grid=8, img_size=64,
                  base_ch=64, ch_mult=(1, 2, 4), enc_res_blocks=1, attn=True, dec_res_blocks=None,
-                 block="res"):
+                 block="res", mid_blocks=1):
         super().__init__()
         Block = VAE_BLOCKS[block]
         n_stages = int(round(math.log2(img_size / latent_grid)))
@@ -144,7 +144,9 @@ class CNNVAE(nn.Module):
         self.enc = nn.Sequential(*enc)
 
         if enc_res_blocks > 0:
-            mid_enc = [Block(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [Block(cur, cur)]
+            mid_enc = ([Block(cur, cur)] * 0 + [Block(cur, cur) for _ in range(mid_blocks)]
+                       + ([AttnBlock(cur)] if attn else [])
+                       + [Block(cur, cur) for _ in range(mid_blocks)])
             self.enc_mid = nn.Sequential(*mid_enc)
         else:
             self.enc_mid = nn.Identity()
@@ -155,7 +157,9 @@ class CNNVAE(nn.Module):
 
         self.dec_in = nn.Conv2d(latent_ch, cur, 3, padding=1)
         if dec_res_blocks > 0:
-            mid_dec = [Block(cur, cur)] + ([AttnBlock(cur)] if attn else []) + [Block(cur, cur)]
+            mid_dec = ([Block(cur, cur) for _ in range(mid_blocks)]
+                       + ([AttnBlock(cur)] if attn else [])
+                       + [Block(cur, cur) for _ in range(mid_blocks)])
             self.dec_mid = nn.Sequential(*mid_dec)
         else:
             self.dec_mid = nn.Identity()

@@ -65,7 +65,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           seed=None, ae_checkpoint="", dit_checkpoint="", dit_continue=False,
                           latent_grid=8, latent_ch=32,
                           vae_enc_res_blocks=1, vae_dec_res_blocks=1,
-                          vae_base_ch=64, vae_block="res",
+                          vae_base_ch=64, vae_block="res", vae_mid_blocks=1,
                           chunk_len=5, dit_d_model=256, dit_n_layers=6, dit_n_heads=8, inference_steps=10):
     run_config = dict(locals())
     _is_cont = (bool(dit_continue) and bool(dit_checkpoint)
@@ -121,7 +121,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                             shuffle=shuffle, horizon=horizon, aux=aux)
 
     ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
-                block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                block=vae_block, mid_blocks=vae_mid_blocks, enc_res_blocks=vae_enc_res_blocks,
                 dec_res_blocks=vae_dec_res_blocks).to(device)
 
     vae_trained = not (ae_checkpoint and os.path.exists(ae_checkpoint))
@@ -229,14 +229,14 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         print(f"[Warn] Decoder checkpoint not found: {dec_checkpoint}. Training Phase 3 as configured.")
     if dec_loaded:
         ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
-                         block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                         block=vae_block, mid_blocks=vae_mid_blocks, enc_res_blocks=vae_enc_res_blocks,
                          dec_res_blocks=dec_res_blocks).to(device)
         ae_full.load_state_dict(torch.load(dec_checkpoint, map_location=device, weights_only=True))
         ae = ae_full.eval()
         print(f"Loaded final VAE (retrained decoder) from {dec_checkpoint} -- skipping Phase 3.")
     elif dec_epochs > 0:
         ae_full = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
-                         block=vae_block, enc_res_blocks=vae_enc_res_blocks,
+                         block=vae_block, mid_blocks=vae_mid_blocks, enc_res_blocks=vae_enc_res_blocks,
                          dec_res_blocks=dec_res_blocks).to(device)
         enc_state = {k: v for k, v in ae.state_dict().items()
                      if k.startswith(("conv_in", "enc", "to_mu", "to_logvar"))}
@@ -321,6 +321,7 @@ if __name__ == "__main__":
     parser.add_argument("--dit_context_noise", type=float, default=0.0, help="Std of Gaussian noise added to the DiT's CONTEXT latents during training (0 = off; in normalized-latent units). Rollout-robustness regularizer against exposure bias; trades a little 1-step accuracy for steadier long horizons. Try ~0.02-0.1.")
     parser.add_argument("--vae_base_ch", type=int, default=64, help="Base channel width of the VAE (stages run at base/2x/4x). A reused ae_checkpoint must match.")
     parser.add_argument("--vae_block", type=str, default="res", choices=["res", "convnext", "mobile"], help="VAE block type: res = classic two-3x3-conv residual block, convnext = depthwise-7x7 + pointwise-MLP, mobile = MobileNetV2 inverted residual (fastest). A reused ae_checkpoint must match.")
+    parser.add_argument("--vae_mid_blocks", type=int, default=1, help="Bottleneck blocks on EACH side of the 8x8 attention, per mid stack (the capacity that directly writes/reads the latent). A reused ae_checkpoint must match.")
     parser.add_argument("--vae_enc_res_blocks", type=int, default=1, help="Residual blocks per level in the VAE ENCODER. 0 = weak encoder (plain conv+downsample, no bottleneck/attention) -- it cannot write an entangled latent at all; 0/0 with the decoder approximates the pre-residual VAE. A reused ae_checkpoint must match this setting.")
     parser.add_argument("--vae_dec_res_blocks", type=int, default=1, help="Residual blocks per level in the PHASE-1 decoder. 0 = weak decoder (plain conv+upsample, no bottleneck/attention): forces the encoder to write an explicit, predictable latent; pair with dec_epochs>0 so Phase 3 trains a full decoder for rendering. A reused ae_checkpoint must match this setting.")
     parser.add_argument("--dec_epochs", type=int, default=0, help="Phase 3: epochs to train a FRESH full-capacity decoder from scratch on clean + DiT-predicted latents (0 = off). Encoder + DiT stay frozen so the latent space and dit.pth remain valid; only the rendering changes. Runs after DiT training, before the final eval.")
@@ -359,7 +360,7 @@ if __name__ == "__main__":
         ae_lpips_weight=args.ae_lpips_weight, ae_lpips_net=args.ae_lpips_net,
         ae_focal_weight=args.ae_focal_weight, ae_pred_weight=args.ae_pred_weight,
         ae_state_weight=args.ae_state_weight, ae_probe=args.ae_probe, ae_grad_clip=args.ae_grad_clip,
-        vae_base_ch=args.vae_base_ch, vae_block=args.vae_block,
+        vae_base_ch=args.vae_base_ch, vae_block=args.vae_block, vae_mid_blocks=args.vae_mid_blocks,
         dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
         dit_warmup_frac=args.dit_warmup_frac, dit_lr_schedule=args.dit_lr_schedule,
         dit_lr_schedule_2=args.dit_lr_schedule_2,
