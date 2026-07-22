@@ -97,6 +97,15 @@ def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_
         print(f"[CollEval] {n_missing} test trajs lack positions.npy (labeled free flight).")
 
     win_labels = labels_g[tgt_idx[:, 0].cpu()]
+    # Per-class MEANS converge long before the full test split is scored; 30k
+    # windows keep >~2k samples even in the rarest class while cutting the pass
+    # from ~10 min to ~1.5 (big decoders made full passes expensive). 0 = score all.
+    max_windows = 30000
+    if max_windows and ctx_idx.shape[0] > max_windows:
+        g = torch.Generator().manual_seed(0)
+        sel = torch.randperm(ctx_idx.shape[0], generator=g)[:max_windows]
+        ctx_idx, tgt_idx, win_labels = ctx_idx[sel], tgt_idx[sel], win_labels[sel]
+        print(f"[CollEval] Scoring a fixed random {max_windows} of {labels_g.shape[0]} windows.")
     ae.eval(); dit.eval()
     scale = dit.latent_scale
     frames = frame_cache.frames
