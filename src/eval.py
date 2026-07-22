@@ -97,9 +97,10 @@ def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_
         print(f"[CollEval] {n_missing} test trajs lack positions.npy (labeled free flight).")
 
     win_labels = labels_g[tgt_idx[:, 0].cpu()]
-    # Per-class MEANS converge long before the full test split is scored; 30k
-    # windows keep >~2k samples even in the rarest class while cutting the pass
-    # from ~10 min to ~1.5 (big decoders made full passes expensive). 0 = score all.
+    # Per-class MEANS converge long before the full test split is scored; a fixed
+    # 30k-window subsample keeps ~600+ samples even in the rarest class (ball-ball
+    # contact, ~2% of windows) -- enough for a stable mean -- while cutting the pass
+    # from ~10 min to ~1.5 (the bigger decoder made full passes expensive). 0 = all.
     max_windows = 30000
     if max_windows and ctx_idx.shape[0] > max_windows:
         n0 = ctx_idx.shape[0]
