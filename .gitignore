@@ -227,3 +227,6 @@ scratchpad/
 
 # generated report documents (PDFs etc.)
 reports/
+
+# experiment run outputs (regenerated, not source)
+experiments/results/
