@@ -61,7 +61,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           dec_rollout_k=5, dec_clean_frac=0.5, dec_grad_clip=30.0, dec_res_blocks=1,
                           dec_n_train_traj=4000, dec_checkpoint="", dec_precision="bf16",
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
-                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40, coll_eval="on", coll_eval_n_traj=400,
+                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40, coll_eval="on", coll_eval_n_traj=500,
                           seed=None, ae_checkpoint="", dit_checkpoint="", dit_continue=False,
                           latent_grid=8, latent_ch=32,
                           vae_enc_res_blocks=1, vae_dec_res_blocks=1,
@@ -347,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_n_gifs", type=int, default=2, help="Number of test trajectories rendered as rollout GIFs.")
     parser.add_argument("--eval_gif_len", type=int, default=40, help="Rollout steps per GIF; clamped to trajectory length minus context_len.")
     parser.add_argument("--coll_eval", choices=["on", "off"], default="on", help="Event-conditioned 1-step eval (free/wall/post/contact PSNR table + collision_eval.json) after the main eval. Turn off to save a few minutes on quick runs.")
-    parser.add_argument("--coll_eval_n_traj", type=int, default=400, help="Held-out trajectories the collision eval scores (bounded, NOT a fraction of the dataset). ~400 = ~38k windows, ~750 samples in the rarest class. Raise for tighter rare-class means, lower for speed.")
+    parser.add_argument("--coll_eval_n_traj", type=int, default=500, help="Held-out trajectories the collision eval scores (bounded, NOT a fraction of the dataset). 500 fully converges the rarest class (ball-ball contact within 0.02px of the 1000-traj reference); 100 is ~0.5px noisy there. Lower for speed.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible runs")
     parser.add_argument("--ae_checkpoint", type=str, default="", help="Path to a saved autoencoder.pth to reuse (skips Phase 1)")
     args = parser.parse_args()

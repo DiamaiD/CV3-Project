@@ -88,12 +88,13 @@ def build_event_labels(frame_cache, trajs):
 
 @torch.no_grad()
 def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
-                               num_steps, run_dir, device, batch_size=256, n_traj=400):
+                               num_steps, run_dir, device, batch_size=256, n_traj=500):
     # Score a fixed, bounded number of held-out trajectories -- NOT a fraction of
-    # the dataset (that would decode a huge subset into RAM on a large set). ~400
-    # trajs is ~38k 1-step windows, so even the rarest class (ball-ball contact,
-    # ~2% of windows) keeps ~750 samples -- plenty for a stable per-class mean --
-    # while decode/RAM stay flat at any dataset size. Fixed seed for reproducibility.
+    # the dataset (that would decode a huge subset into RAM on a large set). At 500
+    # trajs even the rarest class (ball-ball contact, ~2-5% of windows) keeps
+    # hundreds-to-thousands of samples and its mean sits within ~0.02px of the
+    # 1000-traj value (measured on shapes), while decode/RAM stay flat at any dataset
+    # size. Fixed seed for reproducibility.
     test_trajs = sorted(test_trajs)
     if n_traj and len(test_trajs) > n_traj:
         g = torch.Generator().manual_seed(0)
