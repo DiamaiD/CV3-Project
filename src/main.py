@@ -13,7 +13,7 @@ import glob
 logging.getLogger("torch._inductor").setLevel(logging.ERROR)
 logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
 
-from src.dataset import FrameCache, CachedLoader, build_state_targets
+from src.dataset import FrameStore, CachedLoader, build_state_targets
 from src.models import CNNVAE, DiffusionTransformer
 from src.train import (train_autoencoder, build_latent_cache, train_flow_matching,
                        score_latent_predictability, retrain_decoder)
@@ -112,13 +112,11 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     val_trajs = all_trajs[n_train:n_train + n_val]
     test_trajs = all_trajs[n_train + n_val:]
 
-    frame_cache = FrameCache(all_trajs, cache_device=cache_device,
-                             disk_cache_path=os.path.join(data_dir, "frames_cache.pt"))
+    frame_store = FrameStore(all_trajs)
 
     def pixel_loader(trajs, horizon, shuffle, bs, aux=None):
-        ctx_idx, tgt_idx = frame_cache.build_windows(trajs, context_len, horizon)
-        return CachedLoader(frame_cache.frames, ctx_idx, tgt_idx, bs, device,
-                            shuffle=shuffle, horizon=horizon, aux=aux)
+        return frame_store.stream(trajs, context_len, horizon, bs, device,
+                                  shuffle=shuffle, aux=aux)
 
     ae = CNNVAE(latent_ch=latent_ch, latent_grid=latent_grid, base_ch=vae_base_ch,
                 block=vae_block, mid_blocks=vae_mid_blocks, enc_res_blocks=vae_enc_res_blocks,
@@ -131,7 +129,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     else:
         if ae_checkpoint:
             print(f"[Warn] AE checkpoint not found: {ae_checkpoint}. Training a new autoencoder.")
-        state_targets = build_state_targets(frame_cache, data_dir, grid=latent_grid) if ae_state_weight > 0 else None
+        state_targets = build_state_targets(frame_store, data_dir, grid=latent_grid) if ae_state_weight > 0 else None
         ae = train_autoencoder(ae, pixel_loader(train_trajs, 1, True, ae_batch_size, aux=state_targets),
                                pixel_loader(val_trajs, 1, False, ae_batch_size),
                                epochs=ae_epochs, learning_rate=ae_learning_rate,
@@ -150,17 +148,17 @@ def _run_pipeline(data_dir, env_name, context_len=5,
               "skipping the latent cache and everything downstream.")
         return
 
-    z_all, latent_scale = build_latent_cache(ae, frame_cache.frames, device, cache_device,
+    z_all, latent_scale = build_latent_cache(ae, frame_store, device, cache_device,
                                              disk_cache_path=os.path.join(data_dir, "latents_cache.pt"),
-                                             data_sig=frame_cache.sig)
+                                             data_sig=frame_store.sig)
     latent_ch, grid = z_all.shape[1], z_all.shape[-1]
 
     if vae_trained and ae_probe == "on":
-        score_latent_predictability(ae, z_all, latent_scale, frame_cache, train_trajs, val_trajs,
+        score_latent_predictability(ae, z_all, latent_scale, frame_store, train_trajs, val_trajs,
                                     context_len, device)
 
     def latent_loader(trajs, horizon, shuffle, bs):
-        ctx_idx, tgt_idx = frame_cache.build_windows(trajs, context_len, horizon)
+        ctx_idx, tgt_idx = frame_store.build_windows(trajs, context_len, horizon)
         return CachedLoader(z_all, ctx_idx, tgt_idx, bs, device, shuffle=shuffle, horizon=horizon)
 
     dit_loaded = bool(dit_checkpoint) and os.path.exists(dit_checkpoint)
@@ -197,7 +195,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         fm_train = latent_loader(train_trajs, chunk_len, True, dyn_batch_size)
         ev = _parse_event_weights(dit_event_weights)
         if ev is not None:
-            labels_g, n_missing = build_event_labels(frame_cache, train_trajs)
+            labels_g, n_missing = build_event_labels(frame_store, train_trajs)
             if n_missing == len(train_trajs):
                 print("[FM] Event weights set but no positions.npy in the dataset -- uniform sampling.")
             else:
@@ -241,7 +239,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
         enc_state = {k: v for k, v in ae.state_dict().items()
                      if k.startswith(("conv_in", "enc", "to_mu", "to_logvar"))}
         ae_full.load_state_dict(enc_state, strict=False)
-        ae = retrain_decoder(ae_full, dit, z_all, frame_cache, train_trajs, val_trajs, context_len,
+        ae = retrain_decoder(ae_full, dit, z_all, frame_store, train_trajs, val_trajs, context_len,
                              epochs=dec_epochs, learning_rate=dec_learning_rate,
                              lpips_weight=dec_lpips_weight, lpips_net=dec_lpips_net,
                              rollout_k=dec_rollout_k,
@@ -258,7 +256,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
     ae.eval(); dit.eval()
 
     if coll_eval == "on":
-        collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
+        collision_conditioned_eval(ae, dit, z_all, frame_store, test_trajs, context_len,
                                    num_steps=inference_steps, run_dir=run_dir, device=device)
 
     def flow_predict_chunk(context):

@@ -64,10 +64,10 @@ def build_restart_schedule(optimizer, steps_1, lr_1, min_lr_1, steps_2, lr_2, mi
 
 
 @torch.no_grad()
-def build_latent_cache(ae, frames, device, cache_device, batch_size=512,
+def build_latent_cache(ae, store, device, cache_device, batch_size=512,
                        disk_cache_path=None, data_sig=None):
     ae.eval()
-    M = frames.shape[0]
+    M = store.n_frames
 
     # Latents are only valid for one exact (VAE weights, dataset) pair, so the
     # disk cache is keyed on both. A single file per dataset: any other VAE
@@ -93,16 +93,15 @@ def build_latent_cache(ae, frames, device, cache_device, batch_size=512,
                 print(f"[Cache] Failed to load {disk_cache_path} ({e}) -- re-encoding.")
 
     z_all = None
-    print(f"[Cache] Encoding {M} frames into latent cache (one-time)...")
-    for i in range(0, M, batch_size):
-        chunk = frames[i : i + batch_size]
-        if chunk.device != torch.device(device):
-            chunk = chunk.to(device, non_blocking=True)
-        x = chunk.float().div_(255.0)
+    print(f"[Cache] Streaming-encoding {M} frames into latent cache (one-time)...")
+    pos = 0
+    for chunk in store.iter_frames(batch_size=batch_size):
+        x = chunk.to(device, non_blocking=True).float().div_(255.0)
         z = ae.encode(x).half()
         if z_all is None:
             z_all = torch.empty((M, *z.shape[1:]), dtype=torch.float16, device=cache_device)
-        z_all[i : i + batch_size] = z.to(cache_device)
+        z_all[pos : pos + z.shape[0]] = z.to(cache_device)
+        pos += z.shape[0]
     print(f"[Cache] Latent cache ready: {tuple(z_all.shape)} float16 (~{z_all.numel() * 2 / 1e9:.2f} GB).")
 
     s = ss = 0.0
@@ -166,6 +165,8 @@ def _probe_metrics(ae, sur, z_all, frames, ctx_va, tgt_va, context_len, grid, sc
 def score_latent_predictability(ae, z_all, latent_scale, frame_cache, train_trajs, val_trajs,
                                 context_len, device, n_train_traj=500, n_val_traj=100,
                                 epochs=30, width=192, batch_size=256, lr=1e-3, seed=0):
+    if hasattr(frame_cache, "subset"):   # FrameStore -> decode only the probe trajs
+        frame_cache = frame_cache.subset(train_trajs[:n_train_traj] + val_trajs[:n_val_traj])
     ctx_tr, tgt_tr = frame_cache.build_windows(train_trajs[:n_train_traj], context_len, 1)
     ctx_va, tgt_va = frame_cache.build_windows(val_trajs[:n_val_traj], context_len, 1)
     if ctx_tr.shape[0] == 0 or ctx_va.shape[0] == 0:
@@ -537,6 +538,8 @@ def retrain_decoder(ae, dit, z_all, frame_cache, train_trajs, val_trajs, context
                     grad_clip=10.0, n_train_traj=1000, n_val_traj=100, precision="bf16",
                     compile_mode="off", device="cuda"):
     from src.eval import flow_sample
+    if hasattr(frame_cache, "subset"):   # FrameStore -> decode only the decoder-train trajs
+        frame_cache = frame_cache.subset(train_trajs[:n_train_traj] + val_trajs[:n_val_traj])
     ctx_tr, tgt_tr = frame_cache.build_windows(train_trajs[:n_train_traj], context_len, rollout_k)
     ctx_va, tgt_va = frame_cache.build_windows(val_trajs[:n_val_traj], context_len, rollout_k)
     if ctx_tr.shape[0] == 0 or ctx_va.shape[0] == 0:

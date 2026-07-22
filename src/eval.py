@@ -71,7 +71,8 @@ COLL_EVENT_NAMES = ["free flight", "wall bounce", "post ball-ball (1-3f)", "ball
 
 
 def build_event_labels(frame_cache, trajs):
-    labels_g = torch.zeros(frame_cache.frames.shape[0], dtype=torch.int8)
+    n_frames = getattr(frame_cache, "n_frames", None) or frame_cache.frames.shape[0]
+    labels_g = torch.zeros(n_frames, dtype=torch.int8)
     n_missing = 0
     for t in sorted(trajs):
         name = os.path.basename(t)
@@ -88,6 +89,8 @@ def build_event_labels(frame_cache, trajs):
 @torch.no_grad()
 def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
                                num_steps, run_dir, device, batch_size=256):
+    if hasattr(frame_cache, "subset"):   # FrameStore -> decode only the test trajs
+        frame_cache = frame_cache.subset(test_trajs)
     ctx_idx, tgt_idx = frame_cache.build_windows(test_trajs, context_len, 1)
     if ctx_idx.shape[0] == 0:
         print("[CollEval] No 1-step windows; skipping collision-conditioned eval.")
