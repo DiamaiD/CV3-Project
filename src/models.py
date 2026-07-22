@@ -124,6 +124,13 @@ class CNNVAE(nn.Module):
             f"img_size {img_size} must be latent_grid {latent_grid} x a power of two (>=2)"
         self.latent_ch = latent_ch
         self.latent_grid = latent_grid
+        # Bound the sampled log-variance during training (None = off). Pure numeric
+        # safety with KL weight 0: the log-variance head is unregularized and can
+        # drift to huge values (a 1e26 KL diagnostic, exp() overflow risk); this
+        # caps it. Inactive on healthy runs (logvar stays well inside the range), so
+        # it never changes a well-behaved model. Not a Parameter/buffer -> checkpoints
+        # are unaffected, and encode() uses only mu so inference is untouched.
+        self.logvar_clamp = None
         if dec_res_blocks is None:
             dec_res_blocks = enc_res_blocks
         self.enc_res_blocks = enc_res_blocks
@@ -198,6 +205,8 @@ class CNNVAE(nn.Module):
 
     def forward(self, x):
         mu, logvar = self.encode_dist(x)
+        if self.logvar_clamp is not None:
+            logvar = logvar.clamp(-self.logvar_clamp, self.logvar_clamp)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 

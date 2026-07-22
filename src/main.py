@@ -50,7 +50,8 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           ae_lpips_weight=0.0, ae_lpips_net="alex", ae_focal_weight=0.0,
                           ae_pred_weight=0.0, ae_state_weight=0.0, ae_probe="on",
                           ae_grad_clip=10.0, ae_lr_mid=0.0, ae_min_lr=0.0,
-                          ae_lr_phase1_frac=0.1, ae_lr_shape1="linear", ae_lr_shape2="cosine",
+                          ae_lr_phase1_frac=0.1, ae_lr_warmup_frac=0.02,
+                          ae_lr_shape1="linear", ae_lr_shape2="cosine", ae_logvar_clamp=0.0,
                           ae_precision="bf16",
                           dyn_learning_rate=3e-4, dit_min_lr=1e-6, dit_warmup_frac=0.05,
                           dit_lr_schedule="cosine", dit_lr_schedule_2="cosine",
@@ -140,8 +141,9 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                                focal_weight=ae_focal_weight, pred_weight=ae_pred_weight,
                                state_weight=ae_state_weight,
                                grad_clip=ae_grad_clip, lr_mid=ae_lr_mid, min_lr=ae_min_lr,
-                               lr_phase1_frac=ae_lr_phase1_frac, lr_shape1=ae_lr_shape1,
-                               lr_shape2=ae_lr_shape2, precision=ae_precision,
+                               lr_phase1_frac=ae_lr_phase1_frac, lr_warmup_frac=ae_lr_warmup_frac,
+                               lr_shape1=ae_lr_shape1, lr_shape2=ae_lr_shape2,
+                               logvar_clamp=ae_logvar_clamp, precision=ae_precision,
                                compile_mode=compile_mode, device=device)
 
     save_vae_reconstructions(ae, pixel_loader(val_trajs, 1, False, ae_batch_size), device, run_dir)
@@ -302,6 +304,8 @@ if __name__ == "__main__":
     parser.add_argument("--ae_lr_mid", type=float, default=0.0, help="Enable the two-phase VAE LR curve: phase 1 decays --ae_learning_rate -> this over --ae_lr_phase1 of the run, phase 2 decays this -> --ae_min_lr over the rest. 0 = off (single warmup+cosine). Set = phase-1 floor so the handoff is seamless.")
     parser.add_argument("--ae_min_lr", type=float, default=0.0, help="Final VAE LR at the end of phase 2 (two-phase curve only).")
     parser.add_argument("--ae_lr_phase1", type=float, default=0.1, help="Fraction of VAE steps in phase 1 of the two-phase curve (the high-LR portion). Small when data is abundant -- most learning happens on the low-LR tail.")
+    parser.add_argument("--ae_lr_warmup", type=float, default=0.02, help="Warmup as a fraction of the WHOLE VAE run: LR ramps 0 -> peak over this, then the two-phase decay begins (two-phase curve only).")
+    parser.add_argument("--ae_logvar_clamp", type=float, default=0.0, help="Clamp the sampled log-variance to [-c, c] during VAE training (0 = off). Numeric guard against the unregularized drift that KL=0 allows (bounds the 1e26 KL diagnostic / exp overflow); inactive on healthy runs, so it never changes a well-behaved model. ~8 recommended.")
     parser.add_argument("--ae_lr_shape1", choices=["linear", "cosine"], default="linear", help="Phase-1 decay shape of the two-phase VAE curve.")
     parser.add_argument("--ae_lr_shape2", choices=["linear", "cosine"], default="cosine", help="Phase-2 decay shape of the two-phase VAE curve.")
     parser.add_argument("--ae_grad_clip", type=float, default=10.0, help="Max global grad norm for the VAE (clipped each step). Safety net against the loss spikes a deeper LPIPS backbone (e.g. VGG) can trigger. The sum-reduced recon makes norms large, so this is loose; the logged GradNorm (pre-clip) shows the steady-state -- tighten toward ~2-3x it once observed.")
@@ -372,6 +376,7 @@ if __name__ == "__main__":
         ae_state_weight=args.ae_state_weight, ae_probe=args.ae_probe, ae_grad_clip=args.ae_grad_clip,
         ae_lr_mid=args.ae_lr_mid, ae_min_lr=args.ae_min_lr, ae_lr_phase1_frac=args.ae_lr_phase1,
         ae_lr_shape1=args.ae_lr_shape1, ae_lr_shape2=args.ae_lr_shape2,
+        ae_lr_warmup_frac=args.ae_lr_warmup, ae_logvar_clamp=args.ae_logvar_clamp,
         vae_base_ch=args.vae_base_ch, vae_block=args.vae_block, vae_mid_blocks=args.vae_mid_blocks,
         dyn_learning_rate=args.dyn_learning_rate, dit_min_lr=args.dit_min_lr,
         dit_warmup_frac=args.dit_warmup_frac, dit_lr_schedule=args.dit_lr_schedule,

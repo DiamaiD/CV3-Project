@@ -229,10 +229,14 @@ def build_lpips(device, net="alex"):
 def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3,
                       weight_decay=1e-4, kl_weight=1.0, lpips_weight=0.0, lpips_net="alex",
                       focal_weight=0.0, pred_weight=0.0, state_weight=0.0, grad_clip=10.0,
-                      lr_mid=0.0, min_lr=0.0, lr_phase1_frac=0.1,
-                      lr_shape1="linear", lr_shape2="cosine",
+                      lr_mid=0.0, min_lr=0.0, lr_phase1_frac=0.1, lr_warmup_frac=0.02,
+                      lr_shape1="linear", lr_shape2="cosine", logvar_clamp=0.0,
                       precision="bf16", compile_mode="off", device="cuda"):
     print(f"--- Phase 1: Training Autoencoder (VAE) ---")
+    if logvar_clamp and logvar_clamp > 0:
+        ae.logvar_clamp = float(logvar_clamp)
+        print(f"[VAE] log-variance clamp ON: logvar in [-{logvar_clamp:g}, {logvar_clamp:g}] "
+              f"(numeric guard against unregularized drift; inactive on healthy runs).")
     optimizer = optim.AdamW(ae.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     total_steps = epochs * len(train_loader)
@@ -241,13 +245,16 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
         # Phase 1 (first lr_phase1_frac of steps) decays peak -> lr_mid; phase 2 the
         # rest decays lr_mid -> min_lr. build_restart_schedule handles both; because
         # phase-1's floor == phase-2's peak (lr_mid), the "restart" is seamless (no
-        # LR jump). warmup off so it starts exactly at the peak.
+        # LR jump). lr_warmup_frac is a fraction of the WHOLE run; converted to a
+        # fraction of phase 1 for the schedule (a gentle ramp before the peak).
         s1 = max(1, int(total_steps * lr_phase1_frac))
+        wf = min(0.9, lr_warmup_frac / lr_phase1_frac) if lr_phase1_frac > 0 else 0.0
         scheduler = build_restart_schedule(optimizer, s1, learning_rate, lr_mid,
                                            total_steps - s1, lr_mid, min_lr,
-                                           warmup_frac=0.0, shape=lr_shape1, shape_2=lr_shape2)
-        print(f"[VAE] two-phase LR: {lr_shape1} {learning_rate:g} -> {lr_mid:g} over "
-              f"{lr_phase1_frac:.0%} of steps, then {lr_shape2} {lr_mid:g} -> {min_lr:g}")
+                                           warmup_frac=wf, shape=lr_shape1, shape_2=lr_shape2)
+        print(f"[VAE] two-phase LR: warmup {lr_warmup_frac:.1%} -> {lr_shape1} {learning_rate:g} "
+              f"-> {lr_mid:g} over {lr_phase1_frac:.0%} of steps, then {lr_shape2} "
+              f"{lr_mid:g} -> {min_lr:g}")
     else:
         scheduler = build_warmup_cosine(optimizer, total_steps)
     ae.to(device)
