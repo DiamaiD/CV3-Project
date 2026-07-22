@@ -304,7 +304,7 @@ if __name__ == "__main__":
     parser.add_argument("--ae_lr_mid", type=float, default=0.0, help="Enable the two-phase VAE LR curve: phase 1 decays --ae_learning_rate -> this over --ae_lr_phase1 of the run, phase 2 decays this -> --ae_min_lr over the rest. 0 = off (single warmup+cosine). Set = phase-1 floor so the handoff is seamless.")
     parser.add_argument("--ae_min_lr", type=float, default=0.0, help="Final VAE LR at the end of phase 2 (two-phase curve only).")
     parser.add_argument("--ae_lr_phase1", type=float, default=0.1, help="Fraction of VAE steps in phase 1 of the two-phase curve (the high-LR portion). Small when data is abundant -- most learning happens on the low-LR tail.")
-    parser.add_argument("--ae_lr_warmup", type=float, default=0.02, help="Warmup as a fraction of the WHOLE VAE run: LR ramps 0 -> peak over this, then the two-phase decay begins (two-phase curve only).")
+    parser.add_argument("--ae_lr_warmup", type=float, default=0.05, help="Warmup as a fraction of PHASE 1 (the first iteration), same convention as the DiT: LR ramps 0 -> peak over this before the two-phase decay begins.")
     parser.add_argument("--ae_logvar_clamp", type=float, default=0.0, help="Clamp the sampled log-variance to [-c, c] during VAE training (0 = off). Numeric guard against the unregularized drift that KL=0 allows (bounds the 1e26 KL diagnostic / exp overflow); inactive on healthy runs, so it never changes a well-behaved model. ~8 recommended.")
     parser.add_argument("--ae_lr_shape1", choices=["linear", "cosine"], default="linear", help="Phase-1 decay shape of the two-phase VAE curve.")
     parser.add_argument("--ae_lr_shape2", choices=["linear", "cosine"], default="cosine", help="Phase-2 decay shape of the two-phase VAE curve.")
