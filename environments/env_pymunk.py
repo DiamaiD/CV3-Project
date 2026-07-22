@@ -28,6 +28,7 @@ import numpy as np
 from tqdm import tqdm
 import pymunk
 
+from src.frameio import save_frames
 from environments.env_bouncing import MATERIALS, WIDTH, HEIGHT, GRAVITY, AIR_DRAG_COEFF
 from environments.env_shapes import (_draw, _make_shape, _spawn_shapes, _poly_props,
                                      DEFAULT_KIND_WEIGHTS)
@@ -100,19 +101,21 @@ def _add_obj(sp, o):
 
 def _record_and_render(objs, bodies, traj_dir, max_frames, sp, width, height, ss, markers,
                        n_substeps=N_SUBSTEPS):
-    positions, velocities, angles = [], [], []
+    positions, velocities, angles, frames = [], [], [], []
     dt = 1.0 / n_substeps
     for frame in range(max_frames):
         for o, b in zip(objs, bodies):
             o["x"], o["y"] = b.position
             o["theta"] = float(b.angle) % (2 * np.pi)
-        cv2.imwrite(os.path.join(traj_dir, f'frame_{frame:03d}.png'),
-                    _draw(objs, width, height, ss, markers=markers))
+        # _draw returns BGR (for cv2); store RGB so packed == the old PIL(png) read
+        frames.append(cv2.cvtColor(_draw(objs, width, height, ss, markers=markers),
+                                   cv2.COLOR_BGR2RGB))
         positions.append([(float(b.position[0]), float(b.position[1])) for b in bodies])
         velocities.append([(float(b.velocity[0]), float(b.velocity[1])) for b in bodies])
         angles.append([(float(b.angle) % (2 * np.pi), float(b.angular_velocity)) for b in bodies])
         for _ in range(n_substeps):
             sp.step(dt)
+    save_frames(traj_dir, np.stack(frames))
     np.save(os.path.join(traj_dir, "positions.npy"), np.array(positions))
     np.save(os.path.join(traj_dir, "velocities.npy"), np.array(velocities))
     np.save(os.path.join(traj_dir, "angles.npy"), np.array(angles))

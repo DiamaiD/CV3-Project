@@ -49,9 +49,8 @@ class LatentPhysicsDataset(Dataset):
 class FrameCache:
     def __init__(self, traj_dirs, cache_device="cpu", disk_cache_path=None):
         traj_dirs = sorted(traj_dirs)
-        listing = {os.path.basename(t): sorted(glob.glob(os.path.join(t, "*.png"))) for t in traj_dirs}
-        sig = {name: [len(paths), os.path.getmtime(paths[0]) if paths else 0.0]
-               for name, paths in listing.items()}
+        dirs = {os.path.basename(t): t for t in traj_dirs}
+        sig = {name: list(frame_meta(d)) for name, d in dirs.items()}
 
         frames = None
         ranges = None
@@ -70,7 +69,7 @@ class FrameCache:
 
         if frames is None:
             scratch = (disk_cache_path + ".decode.tmp") if disk_cache_path else None
-            frames, ranges = self._decode(listing, scratch_path=scratch)
+            frames, ranges = self._decode(dirs, sig, scratch_path=scratch)
             if disk_cache_path:
                 try:
                     torch.save({"frames": frames, "ranges": ranges, "sig": sig}, disk_cache_path)
@@ -92,16 +91,17 @@ class FrameCache:
         self.device = self.frames.device
 
     @staticmethod
-    def _decode(listing, scratch_path=None):
+    def _decode(dirs, sig, scratch_path=None):
         """Decode all frames into one uint8 tensor. When the tensor would crowd
         physical RAM (big mixes), it is allocated disk-backed via a scratch file
         and filled through the page cache instead -- same result, bounded RAM.
         Training speed is unaffected either way: the saved cache is reopened as
         a memory-map afterwards in both paths."""
         ranges, start = {}, 0
-        total = sum(len(p) for p in listing.values())
-        first = next((p for ps in listing.values() for p in ps), None)
-        H, W = (np.asarray(Image.open(first).convert("RGB")).shape[:2]) if first else (0, 0)
+        names = sorted(dirs.keys())
+        total = sum(sig[n][0] for n in names)
+        first = load_frames(dirs[names[0]]) if names else None
+        H, W = (first.shape[1:3]) if first is not None else (0, 0)
         nbytes = total * 3 * H * W
         phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         disk_backed = scratch_path is not None and nbytes > 0.5 * phys
@@ -113,11 +113,10 @@ class FrameCache:
         else:
             print(f"[Cache] Decoding {total} frames into memory (one-time)...")
             frames = torch.empty((total, 3, H, W), dtype=torch.uint8)
-        for name in sorted(listing.keys()):
-            paths = listing[name]
-            if not paths:
+        for name in names:
+            arr = load_frames(dirs[name])
+            if arr.shape[0] == 0:
                 continue
-            arr = np.stack([np.asarray(Image.open(p).convert("RGB")) for p in paths])
             frames[start:start + arr.shape[0]] = torch.from_numpy(arr).permute(0, 3, 1, 2)
             ranges[name] = (start, arr.shape[0])
             start += arr.shape[0]
@@ -197,7 +196,7 @@ class CachedLoader:
 
 # ---------------------------------------------------------------------------
 # Streaming frame layer: no monolithic decode-to-disk cache. Frames are decoded
-# on demand by a persistent process pool (PIL holds the GIL, so threads don't
+# on demand by a persistent process pool (frame decode holds the GIL, so threads don't
 # scale -- processes give ~36 us/frame, 8x a single core). Full-dataset passes
 # stream in trajectory chunks with the next chunk prefetched while the current
 # one trains, so decode hides behind GPU compute; RAM stays bounded (~2 chunks)
@@ -206,15 +205,17 @@ class CachedLoader:
 import atexit as _atexit
 from multiprocessing import get_context as _get_context
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+from src.frameio import load_frames, frame_meta
+
+
+def _decode_traj(traj_dir):
+    """Load one trajectory as (T, H, W, 3) uint8 RGB (packed .npz or legacy PNGs).
+    Module-level so it pickles cheaply to spawn workers."""
+    return load_frames(traj_dir)
+
 
 _POOL = None
 _POOL_N = None
-
-
-def _decode_traj(paths):
-    """Decode one trajectory's PNGs to a (T, H, W, 3) uint8 array. Module-level
-    and torch-free so it pickles cheaply to spawn workers."""
-    return np.stack([np.asarray(Image.open(p).convert("RGB")) for p in paths])
 
 
 def _get_pool(n_workers):
@@ -248,28 +249,26 @@ def _windows_for(ranges, context_len, horizon):
 
 
 class FrameStore:
-    """Metadata-only view of a frame dataset: trajectory PNG listings, per-traj
-    GLOBAL ranges (name -> (start, count)), a change signature and frame count.
-    Holds no pixels. Full-dataset passes go through .stream()/.iter_frames();
-    small trajectory subsets decode into RAM via .subset()."""
+    """Metadata-only view of a frame dataset: trajectory dirs, per-traj GLOBAL
+    ranges (name -> (start, count)), a change signature and frame count. Holds no
+    pixels and never decodes a frame at init (counts come from frame_meta). Full-
+    dataset passes go through .stream()/.iter_frames(); small trajectory subsets
+    decode into RAM via .subset()."""
 
     def __init__(self, traj_dirs):
         traj_dirs = sorted(traj_dirs)
-        self.listing = {os.path.basename(t): sorted(glob.glob(os.path.join(t, "*.png")))
-                        for t in traj_dirs}
-        self.ranges, start = {}, 0
-        for name in sorted(self.listing):
-            n = len(self.listing[name])
+        self.dirs = {os.path.basename(t): t for t in traj_dirs}
+        self.ranges, self.sig, start = {}, {}, 0
+        for name in sorted(self.dirs):
+            n, mtime = frame_meta(self.dirs[name])
             if n == 0:
                 continue
             self.ranges[name] = (start, n)
+            self.sig[name] = [n, mtime]
             start += n
         self.n_frames = start
-        self.sig = {name: [len(p), os.path.getmtime(p[0]) if p else 0.0]
-                    for name, p in self.listing.items()}
-        first = next((p[0] for p in self.listing.values() if p), None)
-        self.H, self.W = (np.asarray(Image.open(first).convert("RGB")).shape[:2]
-                          if first else (0, 0))
+        first = next(iter(self.ranges), None)
+        self.H, self.W = (load_frames(self.dirs[first]).shape[1:3] if first else (0, 0))
         print(f"[Store] {len(self.ranges)} trajectories, {self.n_frames} frames "
               f"(streamed on demand, no disk cache).")
 
@@ -291,7 +290,7 @@ class FrameStore:
         pool = _get_pool(n_workers)
 
         def decode(cn):
-            arrays = pool.map(_decode_traj, [self.listing[n] for n in cn])
+            arrays = pool.map(_decode_traj, [self.dirs[n] for n in cn])
             return torch.cat([torch.from_numpy(a).permute(0, 3, 1, 2) for a in arrays])
 
         with _ThreadPoolExecutor(max_workers=1) as pf:
@@ -334,7 +333,7 @@ class StreamingLoader:
 
     def _decode_chunk(self, chunk_names):
         pool = _get_pool(self.n_workers)
-        arrays = pool.map(_decode_traj, [self.store.listing[n] for n in chunk_names])
+        arrays = pool.map(_decode_traj, [self.store.dirs[n] for n in chunk_names])
         parts, local_ranges, start, gparts = [], {}, 0, ([] if self.aux is not None else None)
         for name, arr in zip(chunk_names, arrays):
             cnt = arr.shape[0]
@@ -395,7 +394,7 @@ class ResidentFrames:
         parts, row = [], 0
         if names:
             pool = _get_pool(n_workers)
-            arrays = pool.map(_decode_traj, [store.listing[n] for n in names])
+            arrays = pool.map(_decode_traj, [store.dirs[n] for n in names])
             for name, arr in zip(names, arrays):
                 cnt = arr.shape[0]
                 gs = store.ranges[name][0]

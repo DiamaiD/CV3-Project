@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+from src.frameio import load_frames
 
 
 def _psnr(mse_val):
@@ -494,15 +495,14 @@ def _to_rgb(frame, out_wh):
 
 
 def save_rollout_video(predict_chunk_fn, traj_dir, device, run_dir, context_len=5, n_steps=40, fps=10, scale=4):
-    to_tensor = transforms.ToTensor()
-    frame_paths = sorted(glob.glob(os.path.join(traj_dir, "*.png")))
-    n_steps = min(n_steps, len(frame_paths) - context_len)
+    frames_np = load_frames(traj_dir)          # (T, H, W, 3) uint8 RGB, packed or PNG
+    n_steps = min(n_steps, frames_np.shape[0] - context_len)
     if n_steps <= 0:
-        print(f"[Rollout] {traj_dir} too short ({len(frame_paths)} frames), skipping.")
+        print(f"[Rollout] {traj_dir} too short ({frames_np.shape[0]} frames), skipping.")
         return
 
-    frames = torch.stack([to_tensor(Image.open(p).convert("RGB"))
-                          for p in frame_paths[:context_len + n_steps]]).to(device)
+    frames = (torch.from_numpy(frames_np[:context_len + n_steps]).permute(0, 3, 1, 2)
+              .float().div_(255.0).to(device))
     _, H, W = frames.shape[1:]
 
     free_preds = []

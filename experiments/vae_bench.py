@@ -27,6 +27,7 @@ import torch
 
 from experiments.rollout import test_split
 from experiments.surrogate import load_ae
+from src.frameio import load_frames
 
 DOT_BALL = ((0.0, 0.55, 1.4), (2.0 * np.pi / 3.0, 0.38, 1.0))   # (dtheta, frac, r)
 DOT_POLY = ((0, 0.55, 1.3), (1, 0.35, 0.9))                     # (vertex, frac, r)
@@ -74,9 +75,7 @@ def bench_dataset(ae, data_dir, n_traj, device, lpips_fn, batch=256):
         ang = np.load(os.path.join(td, "angles.npy"))[:, :, 0]
         objs = json.load(open(os.path.join(td, "objects.json")))
         T = pos.shape[0]
-        frames = np.stack([
-            cv2.cvtColor(cv2.imread(os.path.join(td, f"frame_{t:03d}.png")), cv2.COLOR_BGR2RGB)
-            for t in range(T)])
+        frames = load_frames(td)[:T]
         x = torch.from_numpy(frames).permute(0, 3, 1, 2).float().div_(255.0)
         rec = torch.empty_like(x)
         with torch.no_grad():

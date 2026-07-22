@@ -25,6 +25,7 @@ import torch
 
 from experiments.latent_analysis import load_traj_meta
 from experiments.rollout import load_run, rollout, test_split
+from src.frameio import load_frames
 
 MAT_NAMES = ["Superball", "Rubber", "Steel", "Sponge"]
 EVENTS = ["free flight", "wall bounce", "post ball-ball (1-3f)", "ball-ball contact"]
@@ -102,9 +103,7 @@ def main():
         if meta is None:
             continue
         radii, mats = meta
-        frames = np.stack([
-            cv2.cvtColor(cv2.imread(os.path.join(td, f"frame_{t:03d}.png")), cv2.COLOR_BGR2RGB)
-            for t in range(pos.shape[0])])
+        frames = load_frames(td)[:pos.shape[0]]
         trajs.append((frames, pos, radii, mats, *_ball_event_sets(pos, vel)))
     windows = [(ti, t) for ti, (f, *_ ) in enumerate(trajs)
                for t in range(ctx_len, f.shape[0], args.stride)]

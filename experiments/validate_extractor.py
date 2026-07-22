@@ -11,11 +11,7 @@ from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from experiments.extractor import extract_states, central_velocity, MAT_NAMES
-
-
-def load_frames(traj_dir):
-    paths = sorted(glob.glob(os.path.join(traj_dir, "frame_*.png")))
-    return np.stack([np.asarray(Image.open(p).convert("RGB")) for p in paths])
+from src.frameio import load_frames
 
 
 def main():

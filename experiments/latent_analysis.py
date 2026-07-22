@@ -22,6 +22,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from experiments.extractor import extract_frame, snap_radius, MAT_NAMES
 from experiments.rollout import load_run, test_split
+from src.frameio import load_frames
 
 CELL = 8
 GRID = 8
@@ -49,9 +50,7 @@ def ridge_apply(model, X):
 
 
 def load_traj_meta(td, pos0):
-    img = None
-    import cv2
-    img = cv2.cvtColor(cv2.imread(os.path.join(td, "frame_000.png")), cv2.COLOR_BGR2RGB)
+    img = load_frames(td)[0]
     dets = extract_frame(img)
     if len(dets) != pos0.shape[0]:
         return None
@@ -106,10 +105,10 @@ def main():
         if meta is None:
             continue
         radii, mats = meta
+        tfrs = load_frames(td)
         for t in range(0, pos.shape[0], args.stride):
-            img = cv2.cvtColor(cv2.imread(os.path.join(td, f"frame_{t:03d}.png")), cv2.COLOR_BGR2RGB)
             entries.append((len(frames_all), pos[t], radii, mats))
-            frames_all.append(img)
+            frames_all.append(tfrs[t])
     frames_np = np.stack(frames_all)
     print(f"[data] {len(test)} trajs -> {len(frames_np)} frames")
 
