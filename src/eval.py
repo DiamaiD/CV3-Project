@@ -88,8 +88,18 @@ def build_event_labels(frame_cache, trajs):
 
 @torch.no_grad()
 def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_len,
-                               num_steps, run_dir, device, batch_size=256):
-    if hasattr(frame_cache, "subset"):   # FrameStore -> decode only the test trajs
+                               num_steps, run_dir, device, batch_size=256, n_traj=400):
+    # Score a fixed, bounded number of held-out trajectories -- NOT a fraction of
+    # the dataset (that would decode a huge subset into RAM on a large set). ~400
+    # trajs is ~38k 1-step windows, so even the rarest class (ball-ball contact,
+    # ~2% of windows) keeps ~750 samples -- plenty for a stable per-class mean --
+    # while decode/RAM stay flat at any dataset size. Fixed seed for reproducibility.
+    test_trajs = sorted(test_trajs)
+    if n_traj and len(test_trajs) > n_traj:
+        g = torch.Generator().manual_seed(0)
+        pick = torch.randperm(len(test_trajs), generator=g)[:n_traj].tolist()
+        test_trajs = [test_trajs[i] for i in pick]
+    if hasattr(frame_cache, "subset"):   # FrameStore -> decode only these trajs
         frame_cache = frame_cache.subset(test_trajs)
     ctx_idx, tgt_idx = frame_cache.build_windows(test_trajs, context_len, 1)
     if ctx_idx.shape[0] == 0:
@@ -98,19 +108,8 @@ def collision_conditioned_eval(ae, dit, z_all, frame_cache, test_trajs, context_
     labels_g, n_missing = build_event_labels(frame_cache, test_trajs)
     if n_missing:
         print(f"[CollEval] {n_missing} test trajs lack positions.npy (labeled free flight).")
-
     win_labels = labels_g[tgt_idx[:, 0].cpu()]
-    # Per-class MEANS converge long before the full test split is scored; a fixed
-    # 30k-window subsample keeps ~600+ samples even in the rarest class (ball-ball
-    # contact, ~2% of windows) -- enough for a stable mean -- while cutting the pass
-    # from ~10 min to ~1.5 (the bigger decoder made full passes expensive). 0 = all.
-    max_windows = 30000
-    if max_windows and ctx_idx.shape[0] > max_windows:
-        n0 = ctx_idx.shape[0]
-        g = torch.Generator().manual_seed(0)
-        sel = torch.randperm(n0, generator=g)[:max_windows]
-        ctx_idx, tgt_idx, win_labels = ctx_idx[sel], tgt_idx[sel], win_labels[sel]
-        print(f"[CollEval] Scoring a fixed random {max_windows} of {n0} windows.")
+    print(f"[CollEval] Scoring {ctx_idx.shape[0]} windows from {len(test_trajs)} held-out trajectories.")
     ae.eval(); dit.eval()
     scale = dit.latent_scale
     frames = frame_cache.frames

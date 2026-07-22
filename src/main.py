@@ -61,7 +61,7 @@ def _run_pipeline(data_dir, env_name, context_len=5,
                           dec_rollout_k=5, dec_clean_frac=0.5, dec_grad_clip=30.0, dec_res_blocks=1,
                           dec_n_train_traj=4000, dec_checkpoint="", dec_precision="bf16",
                           eval_horizon=50, eval_max_batches=24, eval_best_of_n=1,
-                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40, coll_eval="on",
+                          eval_n_pngs=1, eval_n_gifs=2, eval_gif_len=40, coll_eval="on", coll_eval_n_traj=400,
                           seed=None, ae_checkpoint="", dit_checkpoint="", dit_continue=False,
                           latent_grid=8, latent_ch=32,
                           vae_enc_res_blocks=1, vae_dec_res_blocks=1,
@@ -257,7 +257,8 @@ def _run_pipeline(data_dir, env_name, context_len=5,
 
     if coll_eval == "on":
         collision_conditioned_eval(ae, dit, z_all, frame_store, test_trajs, context_len,
-                                   num_steps=inference_steps, run_dir=run_dir, device=device)
+                                   num_steps=inference_steps, run_dir=run_dir, device=device,
+                                   n_traj=coll_eval_n_traj)
 
     def flow_predict_chunk(context):
         _, T, C, H, W = context.shape
@@ -346,6 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_n_gifs", type=int, default=2, help="Number of test trajectories rendered as rollout GIFs.")
     parser.add_argument("--eval_gif_len", type=int, default=40, help="Rollout steps per GIF; clamped to trajectory length minus context_len.")
     parser.add_argument("--coll_eval", choices=["on", "off"], default="on", help="Event-conditioned 1-step eval (free/wall/post/contact PSNR table + collision_eval.json) after the main eval. Turn off to save a few minutes on quick runs.")
+    parser.add_argument("--coll_eval_n_traj", type=int, default=400, help="Held-out trajectories the collision eval scores (bounded, NOT a fraction of the dataset). ~400 = ~38k windows, ~750 samples in the rarest class. Raise for tighter rare-class means, lower for speed.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible runs")
     parser.add_argument("--ae_checkpoint", type=str, default="", help="Path to a saved autoencoder.pth to reuse (skips Phase 1)")
     args = parser.parse_args()
@@ -381,7 +383,7 @@ if __name__ == "__main__":
         eval_horizon=args.eval_horizon, eval_max_batches=args.eval_max_batches,
         eval_best_of_n=args.eval_best_of_n,
         eval_n_pngs=args.eval_n_pngs, eval_n_gifs=args.eval_n_gifs, eval_gif_len=args.eval_gif_len,
-        coll_eval=args.coll_eval,
+        coll_eval=args.coll_eval, coll_eval_n_traj=args.coll_eval_n_traj,
         seed=args.seed, ae_checkpoint=args.ae_checkpoint, dit_checkpoint=args.dit_checkpoint,
         dit_continue=args.dit_continue,
         latent_grid=args.latent_grid, latent_ch=args.latent_ch,
