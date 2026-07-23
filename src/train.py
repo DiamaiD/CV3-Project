@@ -256,7 +256,9 @@ def train_autoencoder(ae, train_loader, val_loader, epochs=5, learning_rate=1e-3
               f"{learning_rate:g} -> {lr_mid:g} over {lr_phase1_frac:.0%} of steps, then "
               f"{lr_shape2} {lr_mid:g} -> {min_lr:g}")
     else:
-        scheduler = build_warmup_cosine(optimizer, total_steps)
+        mf = (min_lr / learning_rate) if (min_lr and learning_rate > 0) else 0.0
+        scheduler = build_warmup_cosine(optimizer, total_steps, min_factor=mf)
+        print(f"[VAE] single cosine LR: 5% warmup -> {learning_rate:g} -> {min_lr:g}")
     ae.to(device)
 
     perceptual = build_lpips(device, net=lpips_net) if lpips_weight > 0 else None
