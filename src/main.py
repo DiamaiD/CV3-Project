@@ -20,12 +20,16 @@ from src.train import (train_autoencoder, build_latent_cache, train_flow_matchin
 from src.eval import (run_evaluation, save_rollout_video, save_vae_reconstructions, flow_sample,
                       collision_conditioned_eval, build_event_labels)
 from src.utils import setup_run_folder, teardown_run_logging
+from src.gpuboost import boost as gpu_boost, restore as gpu_restore
 
 
 def run_training_pipeline(*args, **kwargs):
+    boosted = gpu_boost()   # pin GPU clocks for the run (no-op without the task)
     try:
         return _run_pipeline(*args, **kwargs)
     finally:
+        if boosted:
+            gpu_restore()
         teardown_run_logging()
 
 
