@@ -32,7 +32,8 @@ from src.frameio import save_frames
 from environments.env_bouncing import MATERIALS, WIDTH, HEIGHT, GRAVITY, AIR_DRAG_COEFF
 from environments.env_shapes import (_draw, _make_shape, _spawn_shapes, _poly_props,
                                      DEFAULT_KIND_WEIGHTS)
-from environments.env_tower import _build_tower, _make_projectile, PROJECTILE_KINDS
+from environments.env_tower import (_build_tower, _build_tower_uniform, _make_projectile,
+                                    PROJECTILE_KINDS)
 
 # Production solver settings, chosen by a 4-config accuracy/speed sweep (60 towers +
 # 60 shapes scenes per config, energy + penetration audits):
@@ -61,7 +62,9 @@ def _vel_func(r_eff):
     return f
 
 
-def _make_space(width, height, iterations=ITERATIONS, slop=SLOP, bias=None):
+def _make_space(width, height, iterations=ITERATIONS, slop=SLOP, bias=None, inset=0.0):
+    """inset > 0 pulls all four walls that many world-px into the image: pair it
+    with _draw(border=inset) so bodies bounce off the visible frame's inner edge."""
     sp = pymunk.Space()
     sp.gravity = (0.0, GRAVITY)
     sp.iterations = iterations
@@ -70,8 +73,10 @@ def _make_space(width, height, iterations=ITERATIONS, slop=SLOP, bias=None):
         sp.collision_bias = bias
     sp.sleep_time_threshold = 0.6      # frames of quiet before sleeping
     sp.idle_speed_threshold = 0.05
-    walls = [((0, 0), (width, 0)), ((0, height), (width, height)),
-             ((0, 0), (0, height)), ((width, 0), (width, height))]
+    t = float(inset)
+    lo_x, lo_y, hi_x, hi_y = t, t, width - t, height - t
+    walls = [((lo_x, lo_y), (hi_x, lo_y)), ((lo_x, hi_y), (hi_x, hi_y)),
+             ((lo_x, lo_y), (lo_x, hi_y)), ((hi_x, lo_y), (hi_x, hi_y))]
     for a, b in walls:
         seg = pymunk.Segment(sp.static_body, a, b, 0.0)
         seg.elasticity = 1.0           # product-combine -> pair value = the body's own
@@ -89,18 +94,24 @@ def _add_obj(sp, o):
     body.velocity = (o["vx"], o["vy"])
     body.angular_velocity = o["omega"]
     body.velocity_func = _vel_func(o["r_eff"])
-    if o["verts"] is None:
-        shape = pymunk.Circle(body, o["size"])
+    if o.get("parts") is not None:
+        # concave body (plus): its convex parts attach as separate fixtures of
+        # the ONE body -- o["verts"] holds the concave render outline, which
+        # pymunk.Poly must never see
+        shapes = [pymunk.Poly(body, [tuple(v) for v in part]) for part in o["parts"]]
+    elif o["verts"] is None:
+        shapes = [pymunk.Circle(body, o["size"])]
     else:
-        shape = pymunk.Poly(body, [tuple(v) for v in o["verts"]])
-    shape.elasticity = float(mat["restitution"])
-    shape.friction = float(np.sqrt(max(1.0 - mat["friction"], 0.0)))
-    sp.add(body, shape)
+        shapes = [pymunk.Poly(body, [tuple(v) for v in o["verts"]])]
+    for shape in shapes:
+        shape.elasticity = float(mat["restitution"])
+        shape.friction = float(np.sqrt(max(1.0 - mat["friction"], 0.0)))
+    sp.add(body, *shapes)
     return body
 
 
 def _record_and_render(objs, bodies, traj_dir, max_frames, sp, width, height, ss, markers,
-                       n_substeps=N_SUBSTEPS):
+                       n_substeps=N_SUBSTEPS, outline=False, border=0.0, dot_scale=1.0):
     positions, velocities, angles, frames = [], [], [], []
     dt = 1.0 / n_substeps
     for frame in range(max_frames):
@@ -108,7 +119,9 @@ def _record_and_render(objs, bodies, traj_dir, max_frames, sp, width, height, ss
             o["x"], o["y"] = b.position
             o["theta"] = float(b.angle) % (2 * np.pi)
         # _draw returns BGR (for cv2); store RGB so packed == the old PIL(png) read
-        frames.append(cv2.cvtColor(_draw(objs, width, height, ss, markers=markers),
+        frames.append(cv2.cvtColor(_draw(objs, width, height, ss, markers=markers,
+                                         outline=outline, border=border,
+                                         dot_scale=dot_scale),
                                    cv2.COLOR_BGR2RGB))
         positions.append([(float(b.position[0]), float(b.position[1])) for b in bodies])
         velocities.append([(float(b.velocity[0]), float(b.velocity[1])) for b in bodies])
@@ -131,7 +144,8 @@ def generate_shapes_pymunk(data_dir="data/shapes_pm", n_trajectories=100, max_fr
                            vertex_jitter=0.4, supersample=4, start_idx=0,
                            y_frac_min=0.3, y_frac_max=1.0, size_min=5, size_max=8,
                            markers="on", n_substeps=N_SUBSTEPS, iterations=ITERATIONS, slop=SLOP,
-                           bias=None, progress_cb=None):
+                           bias=None, outline=False, border=0.0, size_ranges=None,
+                           dot_scale=1.0, frozen_rotation=False, progress_cb=None):
     ss = max(1, int(supersample))
     kw = dict(DEFAULT_KIND_WEIGHTS if kind_weights is None else kind_weights)
     os.makedirs(data_dir, exist_ok=True)
@@ -140,13 +154,25 @@ def generate_shapes_pymunk(data_dir="data/shapes_pm", n_trajectories=100, max_fr
         traj_dir = os.path.join(data_dir, f'traj-{start_idx + i}')
         os.makedirs(traj_dir, exist_ok=True)
         n = np.random.randint(n_objects_min, n_objects_max + 1)
-        objs = _spawn_shapes(n, width, height, speed_min, speed_max, kw, spin_max,
+        # with a border, spawn in the inner (wall-inset) box and shift into place
+        iw, ih = width - 2 * border, height - 2 * border
+        objs = _spawn_shapes(n, iw, ih, speed_min, speed_max, kw, spin_max,
                              y_frac_min=y_frac_min, y_frac_max=y_frac_max,
-                             vertex_jitter=vertex_jitter, size_min=size_min, size_max=size_max)
-        sp = _make_space(width, height, iterations, slop, bias)
+                             vertex_jitter=vertex_jitter, size_min=size_min, size_max=size_max,
+                             size_ranges=size_ranges)
+        for o in objs:
+            o["x"] += border
+            o["y"] += border
+        sp = _make_space(width, height, iterations, slop, bias, inset=border)
         bodies = [_add_obj(sp, o) for o in objs]
+        if frozen_rotation:
+            # random INITIAL angle stays forever: infinite rotational inertia
+            # means contacts and friction can never spin the body
+            for b in bodies:
+                b.moment = float("inf")
+                b.angular_velocity = 0.0
         _record_and_render(objs, bodies, traj_dir, max_frames, sp, width, height, ss, markers,
-                           n_substeps)
+                           n_substeps, outline=outline, border=border, dot_scale=dot_scale)
         if progress_cb is not None and ((i + 1) % report_every == 0 or i + 1 == n_trajectories):
             progress_cb(i + 1, n_trajectories)
 
@@ -156,11 +182,13 @@ def generate_tower_pymunk(data_dir="data/tower_pm", n_trajectories=100, max_fram
                           arrive_min=6.0, arrive_max=8.0, projectile_kinds=None,
                           vertex_jitter=0.4, supersample=4, start_idx=0, markers="on",
                           n_substeps=N_SUBSTEPS, iterations=ITERATIONS, slop=SLOP,
-                          bias=None, progress_cb=None):
+                          bias=None, uniform_planks=False, topper_kinds=None,
+                          outline=False, progress_cb=None):
     """Card-house tower + projectile on the pymunk backend. The tower is built with our
     exact geometry, dropped into the space, given a short settle warmup (Chipmunk's own
     solver + sleeping hold it up -- no hand-verification loop needed), then the
-    projectile is launched."""
+    projectile is launched. uniform_planks=True switches to the easy-mode builder:
+    one plank size everywhere, fixed span, distinct-silhouette topper roster."""
     ss = max(1, int(supersample))
     pk = dict(PROJECTILE_KINDS if projectile_kinds is None else projectile_kinds)
     kinds = list(pk.keys())
@@ -173,19 +201,32 @@ def generate_tower_pymunk(data_dir="data/tower_pm", n_trajectories=100, max_fram
         traj_dir = os.path.join(data_dir, f'traj-{start_idx + i}')
         os.makedirs(traj_dir, exist_ok=True)
         n_storeys = np.random.randint(n_storeys_min, n_storeys_max + 1)
-        objs, top, cx, half_w = _build_tower(width, n_storeys, vertex_jitter)
+        if uniform_planks:
+            objs, top, cx, half_w = _build_tower_uniform(width, n_storeys,
+                                                         topper_kinds=topper_kinds)
+        else:
+            objs, top, cx, half_w = _build_tower(width, n_storeys, vertex_jitter)
         sp = _make_space(width, height, iterations, slop, bias)
         bodies = [_add_obj(sp, o) for o in objs]
         for _ in range(12 * n_substeps):          # settle warmup before the projectile
             sp.step(dt)
         plank_ys = [o["y"] for o in objs if o["kind"] == "plank"]
         kind = str(np.random.choice(kinds, p=probs))
+        # easy mode: heavy FAST shots, mostly plunging from high up (Viktor
+        # prefers the from-the-top look; flat_prob keeps a flat minority).
+        # Slow lobs (the arrival-derived speeds, ~2 px/frame) lean on the tower
+        # instead of toppling it, so speed is set directly and the launch side
+        # maximizes the runway. All 4 materials stay in play (material variety
+        # over a few extra surviving towers).
+        aim = dict(flat_prob=0.3, y0_jitter=4.0, aim_jitter=1.0,
+                   size_min=6.0, size_max=8.0,
+                   speed_min=3.5, speed_max=5.0) if uniform_planks else {}
         proj = _make_projectile(kind, cx, top, half_w, plank_ys, width,
-                                arrive_min, arrive_max, vertex_jitter)
+                                arrive_min, arrive_max, vertex_jitter, **aim)
         objs.append(proj)
         bodies.append(_add_obj(sp, proj))
         _record_and_render(objs, bodies, traj_dir, max_frames, sp, width, height, ss, markers,
-                           n_substeps)
+                           n_substeps, outline=outline)
         if progress_cb is not None and ((i + 1) % report_every == 0 or i + 1 == n_trajectories):
             progress_cb(i + 1, n_trajectories)
 
@@ -196,7 +237,7 @@ def generate_balls2_pymunk(data_dir="data/balls2_pm", n_trajectories=5000, max_f
                            supersample=4, start_idx=0,
                            y_frac_min=0.3, y_frac_max=1.0, radius_min=5, radius_max=8,
                            markers="on", n_substeps=N_SUBSTEPS, iterations=ITERATIONS,
-                           slop=SLOP, bias=None, progress_cb=None):
+                           slop=SLOP, bias=None, outline=False, border=0.0, progress_cb=None):
     """Bouncing-balls scenes on the pymunk backend: rotation, ball-ball friction and
     sleeping, same spawn law as generate_bouncing_data (counts, speeds, radii, floor
     bias). Successor to env_shapes.generate_balls2_data."""
@@ -208,4 +249,4 @@ def generate_balls2_pymunk(data_dir="data/balls2_pm", n_trajectories=5000, max_f
         y_frac_min=y_frac_min, y_frac_max=y_frac_max,
         size_min=radius_min, size_max=radius_max, markers=markers,
         n_substeps=n_substeps, iterations=iterations, slop=slop, bias=bias,
-        progress_cb=progress_cb)
+        outline=outline, border=border, progress_cb=progress_cb)

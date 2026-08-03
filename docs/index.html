@@ -111,6 +111,25 @@
     margin: 0 0 14px;
   }
 
+  .gifpicker { display: flex; gap: 8px; margin: 12px 0 12px; }
+  .gifpicker button {
+    min-width: 42px; padding: 7px 12px; cursor: pointer;
+    font: 600 14px "Segoe UI", system-ui, sans-serif;
+    color: var(--muted); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  .gifpicker button.active {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .gifview img {
+    width: 100%; max-width: 560px; display: block;
+    image-rendering: pixelated; border: 1px solid var(--line);
+    border-radius: 8px; background: white;
+  }
+  .gifcap {
+    font-size: 14.5px; font-weight: 600; margin: 0 0 8px;
+  }
+
   .conclusion {
     border-left: 3px solid var(--accent);
     padding: 10px 16px; margin: 16px 0 8px;
@@ -269,30 +288,21 @@
     The trained counts (3 and 5 balls) hold near 100% over the full
     rollout. At 7 and 9 balls there is a quick loss in the first frames,
     then a flatter stretch, and then the decline speeds up again past the
-    training-length line, reaching 94.3% and 87.0% by frame 300. The
+    training-length line, reaching 94.3% and 86.9% by frame 300. The
     effect is strongest at 9 balls. The model never invents extra objects.
   </p>
   <div class="figure"><img src="assets/ood_deform.svg" alt="Deformation per ball count"></div>
   <p class="read">
-    The y axis is the share of a ball's shape that is wrong: area missing
-    where the ball should be plus area in the wrong place next to it. A
-    reshaped ball scores high even if its total size never changes, and
-    the small error that image compression alone causes is subtracted,
-    which is why bands can dip slightly below zero. At the trained counts
-    it stays
-    low for the whole rollout. At 7 and especially 9 balls it keeps
-    growing, reaching on average 12% and 19% of the shape by frame 300.
-    The wide bands show it is uneven: many balls stay clean while some
-    deform heavily.
+    At the trained counts the average deformation stays near zero for
+    the whole rollout. At 7 and 9 balls it grows steadily, reaching 9%
+    and 15% of the shape by frame 300.
   </p>
   <div class="figure"><img src="assets/ood_energy.svg" alt="Energy vs simulator per ball count"></div>
   <p class="read">
-    The y axis is logarithmic: the curves level off near 3 to 5% of the
-    starting energy, they never reach zero. Read with care: the 9-ball
-    model curve lies closest to its simulator, but this is coincidental.
-    The model overestimates scene energy at every count. At 9 balls, early
-    object loss also removes energy from the scene, and the two errors
-    partially cancel.
+    Read with care: the 9-ball model curve lies closest to its simulator,
+    but this is coincidental. The model overestimates scene energy at
+    every count. At 9 balls, early object loss also removes energy from
+    the scene, and the two errors partially cancel.
   </p>
   <div class="conclusion">
     <b>Conclusion.</b> Untrained ball counts cost the model twice: more
@@ -347,10 +357,11 @@
   </p>
   <div class="figure"><img src="assets/size_deform.svg" alt="Deformation for reference, small and large balls"></div>
   <p class="read">
-    The early fall of the curves is misleading: the worst-deformed balls
-    disappear and simply stop being counted. From roughly frame 80 the set
-    of surviving balls is stable, and the small improvement after that is
-    real.
+    Small balls are misdrawn from the very first frames: the model
+    replaces them with larger balls, so around 70% of their shape stays
+    wrong for the entire rollout. Large balls settle near 27% after the
+    initial resize. The slow downward drift of the small-ball curve is
+    partly the worst balls disappearing and dropping out of the count.
   </p>
   <div class="figure"><img src="assets/size_energy.svg" alt="Energy for reference, small and large balls"></div>
   <p class="read">
@@ -403,12 +414,12 @@
   </p>
   <div class="figure"><img src="assets/heldout_survival.svg" alt="Survival of balls vs other shapes for both models"></div>
   <p class="read">
-    The model that never saw balls still keeps them: only 17 of 2,998
-    disappear over 300 frames. Its other shapes also vanish slightly more
-    often than under the control model. We checked every disappearance on
-    the pixels: each one happens in a collision right next to a badly
-    deformed object. The early dip comes from objects that briefly fail to
-    render at the start of the rollout and come back within a few frames.
+    All four curves stay above 99%: object loss is rare for both models.
+    The clearest gap is between the two solid lines: the no-ball model
+    loses about four times as many balls as the control (31 vs 7 of
+    2,998). For the other shapes the two models are nearly equal (32 vs
+    23 of 4,468). So the unknown kind is kept, but it is the one that
+    suffers.
   </p>
   <div class="figure">
     <img src="assets/heldout_assim.png" alt="Worst case: the no-ball model stretches a ball into a plank">
@@ -422,10 +433,10 @@
   </p>
   <div class="figure"><img src="assets/heldout_deform.svg" alt="Deformation split by model and kind class"></div>
   <p class="read">
-    This is where the difference shows: balls under the no-ball model end
-    at 18% of the shape deformed, six times the control model, while its
-    familiar shapes stay clean. The model reshapes the unfamiliar object
-    rather than removing it.
+    Balls under the no-ball model deform steadily along the rollout,
+    ending at 18% of the shape, roughly ten times the control model. The
+    same model's familiar shapes stay clean. The model reshapes the
+    unfamiliar object rather than removing it.
   </p>
   <div class="figure"><img src="assets/heldout_energy.svg" alt="Energy vs simulator for both models"></div>
   <p class="read">
@@ -441,13 +452,70 @@
   </div>
 </section>
 
+<section id="rollouts">
+  <div class="eyebrow">Examples</div>
+  <h2>Rollouts</h2>
+  <p class="lead">
+    The real simulation on the left, the model's prediction from the same
+    5 starting frames on the right: 150 predicted frames for balls and
+    shapes, 300 for the solar systems.
+  </p>
+
+  <h3 class="test">Bouncing balls</h3>
+  <div class="gifpicker" data-env="balls">
+    <button class="active">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button>6</button>
+  </div>
+  <p class="gifcap" id="cap-balls">3 balls</p>
+  <div class="gifview"><img id="gif-balls"
+    src="assets/rollouts/balls_1.gif" alt="Bouncing balls rollout"></div>
+
+  <h3 class="test">Rigid shapes</h3>
+  <div class="gifpicker" data-env="shapes">
+    <button class="active">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button>6</button>
+  </div>
+  <p class="gifcap" id="cap-shapes">triangle, plus, 2 planks, ball</p>
+  <div class="gifview"><img id="gif-shapes"
+    src="assets/rollouts/shapes_1.gif" alt="Rigid shapes rollout"></div>
+
+  <h3 class="test">Solar systems</h3>
+  <div class="gifpicker" data-env="solar">
+    <button class="active">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button>6</button>
+  </div>
+  <p class="gifcap" id="cap-solar">blue star</p>
+  <div class="gifview"><img id="gif-solar"
+    src="assets/rollouts/solar_1.gif" alt="Solar system rollout"></div>
+</section>
+
+<script>
+var GIF_TITLES = {
+  balls: ["3 balls", "5 balls", "5 balls, other mix", "7 balls",
+          "7 balls, fast start", "9 balls"],
+  shapes: ["triangle, plus, 2 planks, ball",
+           "2 triangles, plus, plank, ball",
+           "triangle, 2 pluses, plank, ball", "triangle, plus, plank, ball",
+           "triangle, plus, plank, 2 balls", "2 pluses, 2 planks, ball"],
+  solar: ["blue star", "yellow star", "red star", "double star",
+          "three planets", "oval orbits"]
+};
+document.querySelectorAll(".gifpicker").forEach(function (p) {
+  var env = p.dataset.env;
+  var img = document.getElementById("gif-" + env);
+  var cap = document.getElementById("cap-" + env);
+  p.querySelectorAll("button").forEach(function (b, k) {
+    b.addEventListener("click", function () {
+      p.querySelectorAll("button").forEach(function (x) {
+        x.classList.remove("active");
+      });
+      b.classList.add("active");
+      img.src = "assets/rollouts/" + env + "_" + (k + 1) + ".gif";
+      cap.textContent = GIF_TITLES[env][k];
+    });
+  });
+});
+</script>
+
 <footer>
   <p>
-    Methods: objects are counted and tracked automatically on every frame
-    with sub-pixel precision, and the physical constants are fitted from
-    those tracks. Every measurement is validated on real simulator frames
-    first, so measurement error and model error are never mixed. All error
-    bands ±1 standard error.
     Code &amp; data generation:
     <a href="https://github.com/DiamaiD/CV3-Project">github.com/DiamaiD/CV3-Project</a>.
   </p>

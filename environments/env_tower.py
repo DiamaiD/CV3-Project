@@ -7,7 +7,7 @@ from tqdm import tqdm
 from environments.env_bouncing import MATERIALS, WIDTH, HEIGHT, GRAVITY, AIR_DRAG_COEFF
 from environments.env_shapes import (_poly_props, _local_verts, _jitter_verts,
                                      _contact_step, _find_supporters, _draw, _rot_drag,
-                                     _sim_substeps, SKIN)
+                                     _sim_substeps, _plus_geometry, SKIN)
 
 TRIAL_FRAMES = 12          # awake trial proving a tower is a real equilibrium
 TRIAL_DRIFT = 2.0          # px; stable towers stay under ~1.1 in the trial,
@@ -20,6 +20,10 @@ TRIAL_TILT = 0.15          # rad; unstable ones reach 3px+ / 0.9rad+
 # from frame 0 -- the static phase is real stability, not a freeze.
 PROJECTILE_KINDS = {"ball": 0.40, "square": 0.15, "triangle": 0.15, "halfdisc": 0.15,
                     "hexagon": 0.15}
+# Easy-mode (2026-07-24): the distinct-silhouette roster, shared with the shapes env
+# (no plank here -- Viktor's call: planks are the tower's building material only).
+EASY_PROJECTILE_KINDS = {"ball": 0.40, "triangle": 0.30, "plus": 0.30}
+EASY_TOPPER_KINDS = ["ball", "triangle", "plus"]
 
 
 def _make_plank(half_len, half_thick, x, y, theta, mat_name, vertex_jitter=0.0):
@@ -46,10 +50,10 @@ def _make_plank(half_len, half_thick, x, y, theta, mat_name, vertex_jitter=0.0):
 TOPPER_KINDS = ["ball", "square", "hexagon", "halfdisc"]
 
 
-def _make_topper(cx, beam_top, vertex_jitter):
+def _make_topper(cx, beam_top, vertex_jitter, kinds=None):
     """A big shape resting on the tower's top beam: extra weight pressing down
     through the stack, and something heavy to come crashing down."""
-    kind = str(np.random.choice(TOPPER_KINDS))
+    kind = str(np.random.choice(TOPPER_KINDS if kinds is None else kinds))
     mat_name = str(np.random.choice(list(MATERIALS.keys())))
     mat = MATERIALS[mat_name]
     size = float(np.random.uniform(5.5, 8.0))
@@ -64,6 +68,13 @@ def _make_topper(cx, beam_top, vertex_jitter):
         obj["r_eff"] = size
         obj["theta"] = float(np.random.uniform(0, 2 * np.pi))
         low = size
+    elif kind == "plus":
+        union, parts, area, obj["mass"], obj["inertia"], bound, obj["r_eff"] = \
+            _plus_geometry(size, mat["density"])
+        obj["verts"] = union
+        obj["parts"] = parts
+        obj["size"] = bound
+        low = size          # stands on the vertical bar's foot
     else:
         verts = _jitter_verts(_local_verts(kind, size), vertex_jitter)
         area, obj["mass"], obj["inertia"] = _poly_props(verts, mat["density"])
@@ -110,6 +121,36 @@ def _build_tower(width, n_storeys, vertex_jitter=0.0):
     return objs, y, cx, half_w
 
 
+def _build_tower_uniform(width, n_storeys, half_len=6.0, half_thick=1.2,
+                         topper_kinds=None):
+    """Easy-mode card house: EVERY plank is the same rectangle (a column is the
+    beam stood upright), the span is fixed, no vertex jitter, no storey
+    narrowing. Storey height is 2*half_len + 2*half_thick (14.4 at the 6.0/1.2
+    default -- sized so THREE storeys plus a topper still clear the 64px world
+    with plunge-shot headroom)."""
+    objs = []
+    cx = width / 2 + np.random.uniform(-6, 6)
+    y = 0.0
+    # narrow stance: projectile speed is capped by the context-window arrival
+    # floor (~2-3 px/frame), so knockability must come from a small base --
+    # span 1.0*half_len halves the toppling torque vs the first 1.4 attempt
+    span = 1.0 * half_len
+    mats = list(MATERIALS.keys())
+    for _ in range(n_storeys):
+        for sx in (-1, 1):
+            objs.append(_make_plank(half_len, half_thick, cx + sx * span / 2,
+                                    y + half_len, np.pi / 2, np.random.choice(mats)))
+        objs.append(_make_plank(half_len, half_thick, cx,
+                                y + 2 * half_len + SKIN + half_thick, 0.0,
+                                np.random.choice(mats)))
+        y += 2 * half_len + 2 * half_thick + 2 * SKIN
+    topper = _make_topper(cx, y, 0.0,
+                          kinds=EASY_TOPPER_KINDS if topper_kinds is None else topper_kinds)
+    objs.append(topper)
+    y += 2 * topper["size"]
+    return objs, y, cx, half_len
+
+
 def _verified_tower(width, height, n_storeys, n_substeps, vertex_jitter=0.0):
     """Build towers until one proves itself: simulated AWAKE for TRIAL_FRAMES,
     it must hold position and angle. Only then is it put to sleep (at its exact
@@ -145,31 +186,49 @@ def _verified_tower(width, height, n_storeys, n_substeps, vertex_jitter=0.0):
 
 
 def _make_projectile(kind, tower_cx, tower_top, tower_half_w, plank_ys, width,
-                     arrive_min, arrive_max, vertex_jitter=0.0):
+                     arrive_min, arrive_max, vertex_jitter=0.0,
+                     flat_prob=0.5, y0_jitter=6.0, aim_jitter=1.5, mat_probs=None,
+                     size_min=5.0, size_max=7.0, speed_min=None, speed_max=None,
+                     arrive_floor=4.5):
     """Projectile in flight from frame 0, aimed to reach the tower face at a
     sampled arrival frame (> context length, so the static phase is long enough
-    and every context window sees it coming)."""
+    and every context window sees it coming). Easy-mode towers are short and
+    sturdy: pass a higher flat_prob / tighter jitters (plunging shots sail over
+    them or press them down instead of toppling) and a denser mat_probs --
+    measured on 50 towers, most survivors were Sponge/Rubber shots bouncing off."""
     mats = ["Steel", "Rubber", "Superball", "Sponge"]
-    mat_name = str(np.random.choice(mats, p=[0.45, 0.30, 0.15, 0.10]))
+    mat_name = str(np.random.choice(mats, p=[0.45, 0.30, 0.15, 0.10] if mat_probs is None
+                                    else mat_probs))
     mat = MATERIALS[mat_name]
-    size = float(np.random.uniform(5.0, 7.0))
-    side = np.random.choice((-1, 1))
+    size = float(np.random.uniform(size_min, size_max))
+    if speed_min is not None:
+        # speed-first easy mode: launch from the side FARTHER from the tower
+        # (maximum runway) at a sampled speed; arrival time follows from the
+        # distance instead of dictating a crawl
+        side = 1 if tower_cx >= width / 2 else -1
+    else:
+        side = np.random.choice((-1, 1))
     x0 = (size + 1.0) if side > 0 else (width - size - 1.0)
     # aim at an actual body (uniform aim mostly sails through the storey
     # window between the columns or over the top); bias toward the topper --
     # column centers sit low, so plain uniform choice clusters shots at the base
     if np.random.rand() < 0.4:
-        y_target = float(max(plank_ys)) + float(np.random.uniform(-1.5, 1.5))
+        y_target = float(max(plank_ys)) + float(np.random.uniform(-aim_jitter, aim_jitter))
     else:
-        y_target = float(np.random.choice(plank_ys)) + float(np.random.uniform(-1.5, 1.5))
-    # half the shots launch flat from near the target height, half plunge in
-    # from high up
-    if np.random.rand() < 0.5:
-        y0 = float(np.clip(y_target + np.random.uniform(-6.0, 6.0), size + 1.0, 58.0))
+        y_target = float(np.random.choice(plank_ys)) + float(np.random.uniform(-aim_jitter, aim_jitter))
+    # flat shots launch from near the target height, the rest plunge in from
+    # high up
+    if np.random.rand() < flat_prob:
+        y0 = float(np.clip(y_target + np.random.uniform(-y0_jitter, y0_jitter), size + 1.0, 58.0))
     else:
         y0 = float(np.random.uniform(max(y_target, 34.0), 58.0))
-    t_arrive = np.random.uniform(arrive_min, arrive_max)
     face_x = tower_cx - side * (tower_half_w + size)
+    if speed_min is not None:
+        dist = abs(face_x - x0)
+        speed = min(float(np.random.uniform(speed_min, speed_max)), dist / arrive_floor)
+        t_arrive = dist / speed
+    else:
+        t_arrive = np.random.uniform(arrive_min, arrive_max)
     vx = (face_x - x0) / t_arrive
     # loft against gravity so the shot arrives near its aim height (drag makes
     # this approximate, which adds natural aim variety)
@@ -186,6 +245,12 @@ def _make_projectile(kind, tower_cx, tower_top, tower_half_w, plank_ys, width,
         obj["mass"] = (np.pi * size ** 2) * mat["density"]
         obj["inertia"] = 0.5 * obj["mass"] * size ** 2
         obj["r_eff"] = size
+    elif kind == "plus":
+        union, parts, area, obj["mass"], obj["inertia"], bound, obj["r_eff"] = \
+            _plus_geometry(size, mat["density"])
+        obj["verts"] = union
+        obj["parts"] = parts
+        obj["size"] = bound
     else:
         verts = _jitter_verts(_local_verts(kind, size), vertex_jitter)
         area, obj["mass"], obj["inertia"] = _poly_props(verts, mat["density"])

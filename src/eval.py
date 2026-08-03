@@ -228,10 +228,16 @@ def run_evaluation(test_loader, device, run_dir, ae, dit, num_steps, save_images
             if stats is None:
                 stats = {key: [0.0] * K for key in metric_keys}
 
-            z = ae.encode(ctx_frames.view(-1, C, H, W)) / dit.latent_scale
+            # encode in slices: one shot on B*K frames (2560 at the default
+            # 32x80 eval) is the pipeline's VRAM peak -- with VAE + DiT loaded
+            # it grazed 23.5GB at the 8x8 latent and would OOM at 16x16
+            def _enc(x, chunk=512):
+                return torch.cat([ae.encode(x[i:i + chunk])
+                                  for i in range(0, x.shape[0], chunk)])
+            z = _enc(ctx_frames.view(-1, C, H, W)) / dit.latent_scale
             z_seq = z.view(B, T, *z.shape[1:])
             z_last = z_seq[:, -1]
-            z_future = ae.encode(future_frames.reshape(B * K, C, H, W)).view(B, K, *z.shape[1:]) / dit.latent_scale
+            z_future = _enc(future_frames.reshape(B * K, C, H, W)).view(B, K, *z.shape[1:]) / dit.latent_scale
 
             for k in range(K):
                 stats["persist_pix_mse"][k] += ((last_frame - future_frames[:, k]) ** 2).flatten(1).mean(1).sum().item()

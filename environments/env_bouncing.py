@@ -7,7 +7,30 @@ MATERIALS = {
     "Superball": {"color": (0, 0, 255), "density": 0.5, "restitution": 0.95, "friction": 0.98},
     "Rubber":    {"color": (255, 0, 0), "density": 1.2, "restitution": 0.80, "friction": 0.90},
     "Steel":     {"color": (100, 100, 100), "density": 5.0, "restitution": 0.40, "friction": 0.80},
-    "Sponge":    {"color": (0, 255, 0), "density": 0.2, "restitution": 0.20, "friction": 0.60}
+    "Sponge":    {"color": (0, 255, 0), "density": 0.2, "restitution": 0.20, "friction": 0.60},
+    # solar bodies (env_solar): colors are BGR like everything above; "gm" is
+    # the star's gravitational parameter (sets every orbital period around it),
+    # main-sequence mass ordering blue > yellow > red. Densities follow real
+    # bodies (rocky densest, gas giant least dense). restitution/friction are
+    # inert placeholders -- solar dynamics are closed-form Kepler, no pymunk.
+    "BlueStar":   {"color": (255, 160, 90), "density": 20.0, "gm": 22.0,
+                   "restitution": 0.0, "friction": 0.0},
+    "YellowStar": {"color": (40, 200, 255), "density": 14.0, "gm": 14.0,
+                   "restitution": 0.0, "friction": 0.0},
+    "RedStar":    {"color": (50, 70, 255), "density": 8.0, "gm": 8.0,
+                   "restitution": 0.0, "friction": 0.0},
+    # Rocky was Mars-brown (RGB 150,90,40) -- but on the BLACK solar bg, brown
+    # is colinear-from-black with YellowStar gold at 1.8x brightness ratio, so
+    # the sun's anti-aliased rim out-scored the planet's own color on its axis
+    # and dragged tracked centroids sunward ~3px. Earth-green has 25 deg
+    # minimum separation from every other solar color and near-parity
+    # brightness. Colinearity x brightness-ratio is the palette rule on black.
+    "Rocky":      {"color": (70, 190, 90), "density": 5.0,
+                   "restitution": 0.0, "friction": 0.0},
+    "Ice":        {"color": (190, 200, 60), "density": 2.0,
+                   "restitution": 0.0, "friction": 0.0},
+    "GasGiant":   {"color": (210, 90, 170), "density": 0.7,
+                   "restitution": 0.0, "friction": 0.0},
 }
 
 WIDTH, HEIGHT = 64, 64

@@ -69,9 +69,23 @@ def _rot_drag(o, dt):
     w = o["omega"]
     o["omega"] = w - (AIR_DRAG_COEFF * w * abs(w) * o["r_eff"] ** 4 / o["inertia"]) * dt
 
-KINDS = ["ball", "halfdisc", "triangle", "square", "plank", "hexagon"]
+KINDS = ["ball", "halfdisc", "triangle", "square", "plank", "hexagon", "plus"]
 DEFAULT_KIND_WEIGHTS = {"ball": 0.25, "halfdisc": 0.15, "triangle": 0.15,
                         "square": 0.15, "plank": 0.15, "hexagon": 0.15}
+# The easy-mode roster (2026-07-24 redesign): four maximally distinct silhouettes.
+EASY_KIND_WEIGHTS = {"ball": 0.25, "triangle": 0.25, "plus": 0.25, "plank": 0.25}
+PLUS_ARM_FRAC = 0.34    # plus arm half-thickness as a fraction of its half-length
+# Per-kind size ranges (2026-07-26): triangle and plank have the smallest AREA
+# per unit size (~1.3r^2 / 1.6r^2 vs the ball's 3.1r^2), which made their small
+# instances the DiT's contact victims (deformed then swallowed). Their ranges
+# rise mostly from the bottom -- rough area parity with the other kinds at the
+# low end, max nudged only slightly.
+EASY_SIZE_RANGES = {"triangle": (7.0, 9.0), "plank": (6.5, 8.5)}
+# v3 (2026-07-28): plus joined the enlarged kinds (it became the deformation
+# victim once triangles grew). Keep EASY_SIZE_RANGES frozen for v2
+# reproducibility; v3 datasets use this instead.
+EASY_SIZE_RANGES_V3 = {"triangle": (7.0, 9.0), "plank": (6.5, 8.5),
+                       "plus": (6.5, 8.5)}
 REST_OMEGA = 0.05
 HALFDISC_ARC = 9
 # Sleeping: a body whose speeds stay under these thresholds for SLEEP_AFTER
@@ -146,15 +160,52 @@ def _poly_props(verts, density):
     return area, mass, inertia
 
 
+def _plus_geometry(size, density):
+    """A plus sign is concave, which SAT and pymunk.Poly cannot take whole: the
+    PHYSICS body is a COMPOUND of two axis-aligned rectangles (the pymunk backend
+    attaches both as fixtures), while the RENDER polygon is the single 12-vertex
+    union outline (cv2.fillPoly handles concave), so fills, outlines and the dot
+    markers use the ordinary polygon path. Exact area/inertia by
+    inclusion-exclusion: the bars overlap in the central square, subtract it once.
+    Returns (render_verts, parts, area, mass, inertia, bound, r_eff)."""
+    a, b = float(size), float(size) * PLUS_ARM_FRAC
+    horiz = np.array([(-a, -b), (a, -b), (a, b), (-a, b)])
+    vert = np.array([(-b, -a), (b, -a), (b, a), (-b, a)])
+    union = np.array([(a, b), (b, b), (b, a), (-b, a), (-b, b), (-a, b),
+                      (-a, -b), (-b, -b), (-b, -a), (b, -a), (b, -b), (a, -b)])
+    area = 2 * (2 * a) * (2 * b) - (2 * b) ** 2
+    mass = area * density
+    m_bar = (2 * a) * (2 * b) * density
+    m_sq = (2 * b) ** 2 * density
+    i_bar = m_bar * ((2 * a) ** 2 + (2 * b) ** 2) / 12.0
+    i_sq = m_sq * (2 * (2 * b) ** 2) / 12.0
+    inertia = 2 * i_bar - i_sq
+    return union, [horiz, vert], area, mass, float(inertia), \
+        float(np.hypot(a, b)), float(np.sqrt(area / np.pi))
+
+
+CLASSIC_MATERIALS = ["Superball", "Rubber", "Steel", "Sponge"]
+
+
 def _make_shape(width, height, speed_min, speed_max, kind_weights, spin_max,
                 y_frac_min=0.3, y_frac_max=1.0, vertex_jitter=0.0,
-                size_min=5, size_max=8):
-    mat_name = np.random.choice(list(MATERIALS.keys()))
+                size_min=5, size_max=8, size_ranges=None):
+    # sample from the CLASSIC four, never the whole dict: MATERIALS also holds
+    # the env_solar bodies since 2026-07-30, and `list(MATERIALS.keys())`
+    # silently rolled RedStar/Rocky balls into freshly generated shapes/balls
+    # scenes -- an accidental unseen-color OOD test that poisoned a whole
+    # count-OOD campaign before frames were checked. Every pre-solar dataset
+    # used exactly these four, in this order (np.random stream compatible).
+    mat_name = np.random.choice(CLASSIC_MATERIALS)
     mat = MATERIALS[mat_name]
     kinds = list(kind_weights.keys())
     probs = np.array([kind_weights[k] for k in kinds], dtype=np.float64)
     kind = str(np.random.choice(kinds, p=probs / probs.sum()))
-    size = float(np.random.randint(int(size_min), int(size_max) + 1))
+    if size_ranges is not None and kind in size_ranges:
+        lo, hi = size_ranges[kind]
+        size = float(np.random.uniform(lo, hi))
+    else:
+        size = float(np.random.randint(int(size_min), int(size_max) + 1))
     obj = {"kind": kind, "mat": mat, "mat_name": mat_name, "size": size,
            "theta": float(np.random.uniform(0, 2 * np.pi)),
            "omega": float(np.random.uniform(-spin_max, spin_max))}
@@ -163,6 +214,15 @@ def _make_shape(width, height, speed_min, speed_max, kind_weights, spin_max,
         obj["mass"] = (np.pi * size ** 2) * mat["density"]
         obj["inertia"] = 0.5 * obj["mass"] * size ** 2
         obj["r_eff"] = size
+    elif kind == "plus":
+        # verts = the concave union outline: valid for rendering and objects.json,
+        # NOT for the old engine's convex SAT -- plus is pymunk-backend only,
+        # where _add_obj attaches obj["parts"] as the physical fixtures.
+        union, parts, area, obj["mass"], obj["inertia"], bound, obj["r_eff"] = \
+            _plus_geometry(size, mat["density"])
+        obj["verts"] = union
+        obj["parts"] = parts
+        obj["size"] = bound
     else:
         verts = _jitter_verts(_local_verts(kind, size), vertex_jitter)
         area, obj["mass"], obj["inertia"] = _poly_props(verts, mat["density"])
@@ -185,13 +245,13 @@ def _make_shape(width, height, speed_min, speed_max, kind_weights, spin_max,
 
 def _spawn_shapes(n, width, height, speed_min, speed_max, kind_weights, spin_max,
                   max_tries=100, y_frac_min=0.3, y_frac_max=1.0, vertex_jitter=0.0,
-                  size_min=5, size_max=8):
+                  size_min=5, size_max=8, size_ranges=None):
     objs = []
     for _ in range(n):
         for _ in range(max_tries):
             cand = _make_shape(width, height, speed_min, speed_max, kind_weights,
                                spin_max, y_frac_min, y_frac_max, vertex_jitter,
-                               size_min, size_max)
+                               size_min, size_max, size_ranges)
             ok = True
             for o in objs:
                 min_dist = cand["size"] + o["size"]
@@ -806,15 +866,24 @@ def _pt(x, y, ss, height):
     return (round((x * ss - 0.5) * _SUBPIX), round(((height - y) * ss - 0.5) * _SUBPIX))
 
 
-def _draw(objs, width, height, ss, markers="off"):
+def _draw(objs, width, height, ss, markers="off", outline=False, border=0.0,
+          dot_scale=1.0, bg=255):
     """markers="on": every rotatable body carries an asymmetric marker constellation so its
     orientation is unique over the full 360 deg (a symmetric texture is unreadable modulo the
     body's symmetry -- and what the reader can't see, the model can't know either). Ball: two
     unequal dots at unequal radii, 120 deg apart (a diameter line repeats every 180 deg).
     Polygons: dots toward vertex 0 and vertex 1 (breaks the 60-180 deg near-symmetries).
-    Halfdisc: none needed, its outline is already asymmetric. Bodies render flat (no
-    outline, no inset -- Viktor's call after comparing styles). Default off = legacy render."""
-    img = np.ones((height * ss, width * ss, 3), dtype=np.uint8) * 255
+    Halfdisc: none needed, its outline is already asymmetric. Default (outline=False,
+    border=0) = the legacy flat render, byte-identical for old datasets.
+    outline=True: every body gets a dark edge stroke (easy-mode identity cue).
+    border > 0: a gray frame of that many world-px around the image (pair with the
+    matching physics-wall inset in the pymunk backend).
+    markers="none": no orientation markings at all -- no dots AND no legacy ball
+    line (for frozen-rotation datasets where orientation never changes).
+    bg: canvas gray level, default 255 = the legacy white (0 = space-black for
+    env_solar)."""
+    img = np.ones((height * ss, width * ss, 3), dtype=np.uint8) * bg
+    ow = max(1, round(1.25 * ss))
     for o in objs:
         color = o["mat"]["color"]
         dark = tuple(int(c * 0.45) for c in color)
@@ -823,7 +892,10 @@ def _draw(objs, width, height, ss, markers="off"):
             center = _pt(o["x"], o["y"], ss, height)
             cv2.circle(img, center, round(o["size"] * ss * _SUBPIX), color, -1,
                        lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
-            if o["kind"] == "ball":
+            if outline:
+                cv2.circle(img, center, round(o["size"] * ss * _SUBPIX), dark, ow,
+                           lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
+            if o["kind"] == "ball" and markers != "none":
                 if draw_dots:
                     # two unequal dots at unequal radii, 120 deg apart: an asymmetric
                     # constellation readable over the full 360 deg, without the visual
@@ -833,7 +905,7 @@ def _draw(objs, width, height, ss, markers="off"):
                         md = frac * o["size"]
                         cv2.circle(img, _pt(o["x"] + np.cos(ang) * md, o["y"] + np.sin(ang) * md,
                                             ss, height),
-                                   round(mr * ss * _SUBPIX), dark, -1,
+                                   round(mr * dot_scale * ss * _SUBPIX), dark, -1,
                                    lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
                 else:
                     dx, dy = np.cos(o["theta"]), np.sin(o["theta"])
@@ -845,15 +917,26 @@ def _draw(objs, width, height, ss, markers="off"):
             verts = _world_verts(o)
             pts = np.stack([(verts[:, 0] * ss - 0.5) * _SUBPIX,
                             ((height - verts[:, 1]) * ss - 0.5) * _SUBPIX], axis=1)
-            cv2.fillPoly(img, [np.round(pts).astype(np.int32)], color,
-                         lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
+            ipts = np.round(pts).astype(np.int32)
+            cv2.fillPoly(img, [ipts], color, lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
+            if outline:
+                cv2.polylines(img, [ipts], True, dark, ow,
+                              lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
             if draw_dots and o["kind"] != "halfdisc":
                 for vi, frac, mr in ((0, 0.55, 1.3), (1, 0.35, 0.9)):
                     vx, vy = verts[vi % len(verts)]
                     mx = o["x"] + frac * (vx - o["x"])
                     my = o["y"] + frac * (vy - o["y"])
-                    cv2.circle(img, _pt(mx, my, ss, height), round(mr * ss * _SUBPIX), dark, -1,
+                    cv2.circle(img, _pt(mx, my, ss, height),
+                               round(mr * dot_scale * ss * _SUBPIX), dark, -1,
                                lineType=cv2.LINE_AA, shift=SUBPIX_BITS)
+    if border > 0.0:
+        t = max(1, round(border * ss))
+        bc = (90, 90, 90)
+        img[:t, :] = bc
+        img[-t:, :] = bc
+        img[:, :t] = bc
+        img[:, -t:] = bc
     if ss > 1:
         img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
     return img

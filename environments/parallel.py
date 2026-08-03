@@ -68,3 +68,7 @@ def generate_tower_pymunk_parallel(**kwargs):
 
 def generate_balls2_pymunk_parallel(**kwargs):
     return generate_parallel("environments.env_pymunk", "generate_balls2_pymunk", **kwargs)
+
+
+def generate_solar_parallel(**kwargs):
+    return generate_parallel("environments.env_solar", "generate_solar", **kwargs)
