@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CV3: Physics World Model, Out-of-Distribution Results</title>
+<style>
+  :root {
+    --paper: #F8FAF9;
+    --panel: #FFFFFF;
+    --ink: #16201B;
+    --muted: #5B6B64;
+    --accent: #059669;
+    --ood: #DC2626;
+    --line: #E1E8E4;
+    --plate: #FFFFFF;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0E1412;
+      --panel: #16211C;
+      --ink: #E6ECE8;
+      --muted: #93A39B;
+      --accent: #10B981;
+      --ood: #EF4444;
+      --line: #243129;
+      --plate: #F4F6F5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 0 20px 80px; }
+
+  .eyebrow {
+    font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+  }
+  header.hero { padding: 64px 0 36px; border-bottom: 1px solid var(--line); }
+  header.hero h1 {
+    font-size: clamp(28px, 5vw, 42px); line-height: 1.12;
+    letter-spacing: -0.02em; margin: 10px 0 14px; text-wrap: balance;
+  }
+  header.hero p.thesis {
+    font-size: 17px; color: var(--muted); max-width: 68ch;
+  }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 28px; margin-top: 26px;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta-row div b { display: block; font-size: 20px; }
+  .meta-row div span { font-size: 13px; color: var(--muted); }
+
+  section { padding-top: 52px; }
+  section > h2 {
+    font-size: 26px; letter-spacing: -0.015em; margin: 6px 0 6px;
+  }
+  section > p.lead { color: var(--muted); max-width: 72ch; margin-bottom: 22px; }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 20px 22px;
+  }
+  .card h3 { font-size: 17px; margin-bottom: 4px; }
+  .card p.sub { font-size: 13.5px; color: var(--muted); margin-bottom: 12px; }
+  .spec { list-style: none; padding: 0; font-size: 14.5px; }
+  .spec li {
+    display: flex; justify-content: space-between; gap: 16px;
+    padding: 5px 0; border-top: 1px dashed var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  .spec li span:first-child { color: var(--muted); }
+  .spec li span:last-child { text-align: right; }
+
+  .pipeline {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    margin: 20px 0 24px; font-size: 14px;
+  }
+  .pipeline .stage {
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 999px; padding: 5px 14px; white-space: nowrap;
+  }
+  .pipeline .arrow { color: var(--muted); }
+
+  .env { margin-bottom: 18px; }
+  .env img {
+    width: 100%; max-width: 100%; image-rendering: pixelated;
+    border-radius: 6px; border: 1px solid var(--line); display: block;
+  }
+  .env .env-head {
+    display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px;
+  }
+  .env .env-head h3 { font-size: 17px; }
+  .env .env-head span { font-size: 13px; color: var(--muted); }
+  .env p.facts { font-size: 14.5px; color: var(--muted); margin-top: 10px; max-width: 78ch; }
+
+  .figure {
+    background: var(--plate); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; margin: 18px 0 8px;
+  }
+  .figure img { width: 100%; display: block; }
+  .figure img + img { margin-top: 10px; }
+  p.read {
+    font-size: 14.5px; color: var(--muted); max-width: 78ch;
+    margin: 0 0 14px;
+  }
+
+  .conclusion {
+    border-left: 3px solid var(--accent);
+    padding: 10px 16px; margin: 16px 0 8px;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border-radius: 0 8px 8px 0; font-size: 15px; max-width: 78ch;
+  }
+  .conclusion b { color: var(--accent); }
+
+  section h3.test {
+    font-size: 20px; margin: 40px 0 4px; letter-spacing: -0.01em;
+  }
+  section p.setup { font-size: 14.5px; color: var(--muted); max-width: 78ch; }
+
+  .numbers {
+    display: flex; flex-wrap: wrap; gap: 22px; margin: 14px 0 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .numbers div b { display: block; font-size: 18px; }
+  .numbers div span { font-size: 12.5px; color: var(--muted); }
+
+  footer {
+    margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line);
+    font-size: 13.5px; color: var(--muted);
+  }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+
+<header class="hero">
+  <div class="eyebrow">CV3 Project</div>
+  <h1>A physics world model under distribution shift</h1>
+  <p class="thesis">
+    A 38M-parameter video world model (CNN-VAE + flow-matching DiT) is
+    trained on three simulated physical environments at 64×64 resolution.
+    The trained models are evaluated on scenes outside the training
+    distribution, with higher object counts, unseen object sizes, object
+    kinds never seen in training, and more oval planet orbits. The physical
+    constants of each world are re-measured directly from model rollouts.
+  </p>
+  <div class="meta-row">
+    <div><b>3</b><span>environments</span></div>
+    <div><b>64×64 px</b><span>video resolution</span></div>
+    <div><b>8×8 px</b><span>latent space (32 channels)</span></div>
+    <div><b>23.5M + 14.5M</b><span>VAE + DiT parameters</span></div>
+  </div>
+</header>
+
+<section id="model">
+  <div class="eyebrow">Architecture</div>
+  <h2>Model</h2>
+  <p class="lead">
+    Two stages, trained separately: a VAE compresses each frame into a
+    latent image, and a flow-matching transformer predicts the latent of
+    the following frame(s). Rollouts are autoregressive. The model receives
+    5 context frames and then continues on its own predictions.
+  </p>
+  <div class="pipeline">
+    <span class="stage">frame 64×64×3</span><span class="arrow">→</span>
+    <span class="stage">VAE encoder</span><span class="arrow">→</span>
+    <span class="stage">latent 8×8×32</span><span class="arrow">→</span>
+    <span class="stage">DiT (flow matching)</span><span class="arrow">→</span>
+    <span class="stage">next latent</span><span class="arrow">→</span>
+    <span class="stage">VAE decoder</span>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <h3>VAE</h3>
+      <p class="sub">Convolutional autoencoder, ConvNeXt blocks; one per world</p>
+      <ul class="spec">
+        <li><span>parameters</span><span>23.5M</span></li>
+        <li><span>latent</span><span>8×8 × 32 channels (2048 dims/frame)</span></li>
+        <li><span>base width</span><span>128 channels</span></li>
+        <li><span>blocks</span><span>1 encoder / 2 decoder res blocks</span></li>
+        <li><span>during DiT training</span><span>frozen</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>DiT</h3>
+      <p class="sub">Diffusion transformer trained with flow matching on latent sequences</p>
+      <ul class="spec">
+        <li><span>parameters</span><span>14.5M</span></li>
+        <li><span>size</span><span>d = 256, 12 layers, 8 heads</span></li>
+        <li><span>context</span><span>5 frames</span></li>
+        <li><span>prediction</span><span>next 1 frame (balls/shapes), 5 (solar)</span></li>
+        <li><span>inference</span><span>3 sampling steps (2 for solar)</span></li>
+        <li><span>training</span><span>Huber loss, EMA 0.999, context noise 0.05, bf16</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="data">
+  <div class="eyebrow">Environments</div>
+  <h2>Environments and datasets</h2>
+  <p class="lead">
+    All data is generated by exact simulators, so every evaluation compares
+    the model against ground truth known to machine precision. Each image
+    below shows three sample scenes from the dataset.
+  </p>
+
+  <div class="env">
+    <div class="env-head"><h3>Bouncing balls</h3><span>pymunk engine · 60,000 trajectories × 100 frames</span></div>
+    <img src="assets/env_balls.png" alt="Three sample scenes from the bouncing balls dataset">
+    <p class="facts">
+      2–5 balls, radius 5–8 px; gravity −0.5 px/frame², speed-dependent
+      air drag, no rotation. Four materials with different bounciness
+      (fraction of speed kept per bounce): Superball 0.95, Rubber 0.80,
+      Steel 0.40, Sponge 0.20.
+    </p>
+  </div>
+
+  <div class="env">
+    <div class="env-head"><h3>Rigid shapes</h3><span>pymunk engine · 60,000 trajectories × 100 frames</span></div>
+    <img src="assets/env_shapes.png" alt="Three sample scenes from the rigid shapes dataset">
+    <p class="facts">
+      Same engine and physics: triangles, pluses, planks and balls that
+      stack, topple and slide. A second 60,000-trajectory variant without
+      balls trains the model for test 5, held-out object kind.
+    </p>
+  </div>
+
+  <div class="env">
+    <div class="env-head"><h3>Solar systems</h3><span>exact orbit formulas · 200,000 trajectories × 30 frames</span></div>
+    <img src="assets/env_solar.png" alt="Three sample scenes from the solar system dataset">
+    <p class="facts">
+      Orbits are computed directly from Kepler's formulas, so the ground
+      truth is exact rather than a physics-engine approximation. 1–3
+      planets per system, 25% double stars, at most mildly oval orbits.
+      The star's color sets the strength of its gravity: blue strongest,
+      yellow middle, red weakest.
+    </p>
+  </div>
+</section>
+
+<section id="ood">
+  <div class="eyebrow">Results</div>
+  <h2>Out-of-distribution tests</h2>
+  <p class="lead">
+    Each test moves one attribute beyond the training range. All quantities
+    are measured from 300-frame rollouts: objects are tracked frame by
+    frame with sub-pixel precision, counted, and the physical constants are
+    re-fitted from those tracks. Every measurement is also run on real
+    simulator frames through the same pipeline, which separates model error
+    from measurement error. Error bands are ±1 standard error.
+  </p>
+
+  <h3 class="test">1 · Object count</h3>
+  <p class="setup">
+    Trained on 2–5 balls, evaluated on 3, 5, 7 and 9 (1,000 scenes per
+    count).
+  </p>
+  <div class="figure"><img src="assets/ood_survival.svg" alt="Survival vs rollout frame per ball count"></div>
+  <p class="read">
+    The trained counts (3 and 5 balls) hold near 100% over the full
+    rollout. At 7 and 9 balls there is a quick loss in the first frames,
+    then a flatter stretch, and then the decline speeds up again past the
+    training-length line, reaching 94.3% and 87.0% by frame 300. The
+    effect is strongest at 9 balls. The model never invents extra objects.
+  </p>
+  <div class="figure"><img src="assets/ood_deform.svg" alt="Deformation per ball count"></div>
+  <p class="read">
+    The y axis is the share of a ball's shape that is wrong: area missing
+    where the ball should be plus area in the wrong place next to it. A
+    reshaped ball scores high even if its total size never changes, and
+    the small error that image compression alone causes is subtracted,
+    which is why bands can dip slightly below zero. At the trained counts
+    it stays
+    low for the whole rollout. At 7 and especially 9 balls it keeps
+    growing, reaching on average 12% and 19% of the shape by frame 300.
+    The wide bands show it is uneven: many balls stay clean while some
+    deform heavily.
+  </p>
+  <div class="figure"><img src="assets/ood_energy.svg" alt="Energy vs simulator per ball count"></div>
+  <p class="read">
+    The y axis is logarithmic: the curves level off near 3 to 5% of the
+    starting energy, they never reach zero. Read with care: the 9-ball
+    model curve lies closest to its simulator, but this is coincidental.
+    The model overestimates scene energy at every count. At 9 balls, early
+    object loss also removes energy from the scene, and the two errors
+    partially cancel.
+  </p>
+  <div class="conclusion">
+    <b>Conclusion.</b> Untrained ball counts cost the model twice: more
+    balls disappear, and the ones that stay deform more. Both effects grow
+    the longer the rollout runs. The model never invents extra objects.
+  </div>
+
+  <h3 class="test">2 · Physical constants</h3>
+  <p class="setup">
+    Gravity, air drag and restitution (bounciness) are re-measured from
+    model rollouts: gravity and drag from the flight paths of tracked
+    balls, restitution from wall bounces. Gray points show the same measurement applied to real
+    simulator frames: any deviation there is measurement error, not model
+    error.
+  </p>
+  <div class="figure"><img src="assets/ood_constants.svg" alt="Gravity, air drag and restitution recovered from rollouts vs ball count"></div>
+  <p class="read">
+    Gravity and restitution (bounciness) stay at their true values at
+    every count. Air
+    drag is the only constant that degrades: the more balls in the scene,
+    the more the model slows everything down, from +6% extra drag at 3
+    balls to +50% at 9. Gravity measures correct even in those same
+    scenes, so this is genuinely a drag error and not a hidden gravity
+    error.
+  </p>
+  <div class="conclusion">
+    <b>Conclusion.</b> Crowded scenes do not break gravity or the
+    materials. The model's only error is that it brakes moving objects too
+    hard.
+  </div>
+
+  <h3 class="test">3 · Object size</h3>
+  <p class="setup">
+    Trained on radius 5–8 px, evaluated on small (3–4 px) and large
+    (9–12 px) balls.
+  </p>
+  <div class="figure">
+    <img src="assets/size_repair_large.png" alt="Frame strip: oversized balls being shrunk by the model">
+    <img src="assets/size_repair_small.png" alt="Frame strip: undersized balls being enlarged or removed by the model">
+  </div>
+  <p class="read">
+    Oversized balls (top strip) are shrunk step by step to the sizes the
+    model was trained on; undersized balls (bottom strip) are enlarged,
+    merged or removed. The model edits the scene until it looks like its
+    training data, then simulates it normally.
+  </p>
+  <div class="figure"><img src="assets/size_survival.svg" alt="Survival for reference, small and large balls"></div>
+  <p class="read">
+    Most losses happen in the first frames, while the model is resizing
+    the balls. After that the decline is slow, ending near 82–83% for both
+    the small and the large balls.
+  </p>
+  <div class="figure"><img src="assets/size_deform.svg" alt="Deformation for reference, small and large balls"></div>
+  <p class="read">
+    The early fall of the curves is misleading: the worst-deformed balls
+    disappear and simply stop being counted. From roughly frame 80 the set
+    of surviving balls is stable, and the small improvement after that is
+    real.
+  </p>
+  <div class="figure"><img src="assets/size_energy.svg" alt="Energy for reference, small and large balls"></div>
+  <p class="read">
+    After the resizing the model's balls are different sizes than the
+    simulator's, so these curves compare two different scenes; read them
+    with care.
+  </p>
+  <div class="conclusion">
+    <b>Conclusion.</b> The model does not simulate out-of-range sizes.
+    Instead it edits them: objects are shrunk, enlarged or removed until
+    the scene fits the training distribution.
+  </div>
+
+  <h3 class="test">4 · Orbit shape (eccentricity)</h3>
+  <p class="setup">
+    The solar model, trained on near-circular orbits, is run on clearly
+    oval ones (1,000 scenes) and compared against the exact orbit math.
+  </p>
+  <div class="figure"><img src="assets/ecc_ood.svg" alt="Position error and radius drift for eccentric orbits"></div>
+  <p class="read">
+    On oval orbits the planets drift off the true positions several times
+    faster than on familiar circular ones, and the orbit radius keeps
+    changing: the model slowly reshapes oval orbits into the circular
+    orbits it was trained on. One thing survives: planets still correctly
+    move faster when they are closer to their sun, almost exactly as
+    physics demands.
+  </p>
+  <div class="figure"><img src="assets/solar_energy.svg" alt="Orbital energy drift for in-distribution and eccentric systems"></div>
+  <p class="read">
+    In real physics these curves would be flat lines at zero: an orbit
+    keeps its energy forever. The model's planets instead slowly lose
+    energy and sink toward their star, about 4% over 300 frames on
+    familiar orbits and 10% on oval ones. The thin gray band is the
+    measurement error, far smaller than the effect.
+  </p>
+  <div class="conclusion">
+    <b>Conclusion.</b> The model drags unfamiliar orbits back toward the
+    circular shapes it knows and slowly drains their energy, but the law
+    it learned, faster near the sun and slower far away, survives.
+  </div>
+
+  <h3 class="test">5 · Held-out object kind</h3>
+  <p class="setup">
+    A second shapes model is trained on the same recipe but on a dataset
+    containing no balls. Both models are then rolled out on the same 2,000
+    ball-containing scenes (2,998 balls, 4,468 other shapes, identical
+    per-scene seeds). Survival counts an object as gone only when it
+    clearly disappears and stays gone, so one-frame glitches cannot move
+    the curve.
+  </p>
+  <div class="figure"><img src="assets/heldout_survival.svg" alt="Survival of balls vs other shapes for both models"></div>
+  <p class="read">
+    The model that never saw balls still keeps them: only 17 of 2,998
+    disappear over 300 frames. Its other shapes also vanish slightly more
+    often than under the control model. We checked every disappearance on
+    the pixels: each one happens in a collision right next to a badly
+    deformed object. The early dip comes from objects that briefly fail to
+    render at the start of the rollout and come back within a few frames.
+  </p>
+  <div class="figure">
+    <img src="assets/heldout_assim.png" alt="Worst case: the no-ball model stretches a ball into a plank">
+    <img src="assets/heldout_typical.png" alt="Typical case: all three sources look alike">
+  </div>
+  <p class="read">
+    In the worst cases the model redraws the unknown ball as a kind it
+    knows: the red ball is stretched into a rounded plank within 15 frames
+    and never recovers. In typical scenes the three sources are hard to
+    tell apart.
+  </p>
+  <div class="figure"><img src="assets/heldout_deform.svg" alt="Deformation split by model and kind class"></div>
+  <p class="read">
+    This is where the difference shows: balls under the no-ball model end
+    at 18% of the shape deformed, six times the control model, while its
+    familiar shapes stay clean. The model reshapes the unfamiliar object
+    rather than removing it.
+  </p>
+  <div class="figure"><img src="assets/heldout_energy.svg" alt="Energy vs simulator for both models"></div>
+  <p class="read">
+    The no-ball model keeps more leftover motion in the scene than the
+    simulator says it should. Most of that is the deformed balls wobbling
+    in place after everything else has settled.
+  </p>
+  <div class="conclusion">
+    <b>Conclusion.</b> The unknown kind is kept, not deleted: the model
+    moves it under nearly correct gravity, but brakes it too hard and in
+    the worst cases redraws it as a shape it knows. The same extra-drag
+    error as in the crowding test.
+  </div>
+</section>
+
+<footer>
+  <p>
+    Methods: objects are counted and tracked automatically on every frame
+    with sub-pixel precision, and the physical constants are fitted from
+    those tracks. Every measurement is validated on real simulator frames
+    first, so measurement error and model error are never mixed. All error
+    bands ±1 standard error.
+    Code &amp; data generation:
+    <a href="https://github.com/DiamaiD/CV3-Project">github.com/DiamaiD/CV3-Project</a>.
+  </p>
+</footer>
+
+</main>
+</body>
+</html>
