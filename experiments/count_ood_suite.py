@@ -1,7 +1,7 @@
 """Count-OOD suite for the balls-v3 world (train dist 2-5 balls): scenes with
 exactly 3/5/7/9 balls, 300-frame rollouts of the balls-60k model, measured
-with the validated stack: identity-free counting survival (zero-floor
-counter), metric-v5 deformation excess over the VAE-roundtrip floor
+with identity-free counting survival (zero-floor
+counter), deformation excess over the VAE-roundtrip floor
 (mean +- std across object-frame samples), and tracked energy vs simulator
 (per-scene ratio, mean +- std across scenes). GT counting control per set
 gates everything. Outputs count_ood.json + 3 graphs."""

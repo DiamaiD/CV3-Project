@@ -40,9 +40,9 @@ SUBPIX_BITS = 4
 _SUBPIX = 1 << SUBPIX_BITS
 REST_VELOCITY = abs(GRAVITY)
 
-# CV3_LEGACY_CONTACTS=1 reproduces the pre-2026-07-15 contact behavior (positional
+# CV3_LEGACY_CONTACTS=1 reproduces the legacy contact behavior (positional
 # correction skipped for resting/separating pairs -> interpenetrating piles).
-# Needed to bit-exactly re-simulate datasets/models from before the fix.
+# Needed to bit-exactly re-simulate the legacy datasets/models.
 LEGACY_CONTACTS = os.environ.get("CV3_LEGACY_CONTACTS", "0") == "1"
 
 # Sleeping: a ball that stays slow AND supported (on the floor or on a sleeping ball)

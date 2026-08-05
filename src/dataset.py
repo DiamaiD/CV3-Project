@@ -382,7 +382,7 @@ class StreamingLoader:
 
 class ResidentFrames:
     """Decodes a (small) set of trajectories into RAM but presents GLOBAL frame
-    indexing, so it drop-in replaces the old full FrameCache for consumers that
+    indexing, so it drop-in replaces a full FrameCache for consumers that
     pair frames with the global latent cache (probe, collision eval, decoder
     retrain). frame_cache.frames[global_idx] and .build_windows() both work."""
 

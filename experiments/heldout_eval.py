@@ -4,7 +4,7 @@ model (in-distribution control) on the SAME 500 ball-guaranteed scenes
 vs other shapes:
   - survival: per-object template presence (> 0.5 aligned overlap), with the
     VAE-roundtrip control tracked identically as the instrument ceiling
-  - deformation: metric v5 excess over the roundtrip floor
+  - deformation: excess over the roundtrip floor
   - energy: tracked total energy vs matched simulator (global)
   - identity-free count deficit (global gate + curve)
 Ball free-flight arcs (balls only; isolation against ALL objects) feed the

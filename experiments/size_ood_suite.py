@@ -1,7 +1,7 @@
 """Size-OOD battery for the balls-60k model (trained on r5-8): small r3-4 and
 large r9-12 scene sets vs the in-distribution ballsv3 reference. Same
-validated stack as the count suite (imports its worker); survival normalized
-by per-scene ball counts (2-5 per scene here). Numbers only (per Viktor)."""
+stack as the count suite (imports its worker); survival normalized
+by per-scene ball counts (2-5 per scene here)."""
 import json
 import os
 import zlib

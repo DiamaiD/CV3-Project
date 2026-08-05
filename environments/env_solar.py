@@ -5,7 +5,7 @@ Kepler ellipses around the star (or the barycenter of a binary pair), so
 Kepler's 2nd and 3rd laws hold to machine precision in the ground truth and
 there is NO integration drift.
 
-Physics choices (agreed with Viktor 2026-07-30, mirroring real astronomy):
+Physics choices (mirroring real astronomy):
 - sun-planet gravity only (planet-planet forces are ~1e-4 of the sun's in
   real systems on visible timescales);
 - star classes with main-sequence mass ordering: blue heavy, yellow medium,
@@ -38,9 +38,8 @@ from environments.env_shapes import _draw
 from src.frameio import save_frames
 
 STAR_CLASSES = ["BlueStar", "YellowStar", "RedStar"]
-# sizes v2 (2026-07-31, Viktor: "would love 3 planets in some scenes"): stars
-# and planets trimmed + GAP tightened so packed 3-planet rosters fit the 64px
-# radial budget (20%% of singles at these values; the v1 sizes NEVER fit 3)
+# stars and planets sized (and GAP tightened) so packed 3-planet rosters fit
+# the 64px radial budget (~20% of single-star scenes at these values)
 STAR_SIZE = {"BlueStar": (7.0, 8.2), "YellowStar": (6.0, 7.2),
              "RedStar": (4.8, 6.0)}
 PLANET_CLASSES = ["Rocky", "Ice", "GasGiant"]
@@ -67,13 +66,12 @@ def _sample_system(binary_prob=0.25, n_planets_min=1, n_planets_max=4,
     binary = np.random.rand() < binary_prob
     stars = []
     if binary:
-        # compact pair, stars drawn at ~40% class size (cartoon compression --
+        # compact pair, stars drawn at ~40% class size (cartoon compression:
         # full-size pairs + the stability rule leave no radial budget for
-        # planets and the resampler then silently rejects EVERY binary; caught
-        # when a 25% setting produced 0/40). Circumbinary orbits >= 2.3x the
-        # separation (Holman-Wiegert critical limit for circular binaries);
-        # binaries carry 1-2 planets, true to real circumbinary systems
-        # (Kepler-16 has one known planet).
+        # planets, and the resampler then silently rejects every binary).
+        # Circumbinary orbits >= 2.3x the separation (Holman-Wiegert critical
+        # limit for circular binaries); binaries carry 1-2 planets, true to
+        # real circumbinary systems (Kepler-16 has one known planet).
         c1, c2 = np.random.choice(STAR_CLASSES, 2, replace=True)
         s1 = 0.4 * np.random.uniform(*STAR_SIZE[c1])
         s2 = 0.4 * np.random.uniform(*STAR_SIZE[c2])
@@ -102,10 +100,9 @@ def _sample_system(binary_prob=0.25, n_planets_min=1, n_planets_max=4,
 
     n_lo, n_hi = (1, 2) if binary else (n_planets_min, n_planets_max)
     # RETRY WITHIN THE TYPE: rejecting the whole system and re-flipping the
-    # binary coin let easy-to-fit rosters win the resampling race -- binaries
-    # (1-planet minimum) got enriched to ~43% (caught in the 200k production
-    # spot-check). Placement is retried for the SAME system type until the
-    # roster meets the minimum, so the coin stays a true 25%. A truncated
+    # binary coin lets easy-to-fit rosters win the resampling race and skews
+    # the binary share. Placement is retried for the SAME system type until
+    # the roster meets the minimum, so the coin stays a true 25%. A truncated
     # roster (n drawn but fewer fit) is ACCEPTED: the 64px radial budget
     # genuinely holds ~2 planets around a full-size sun (3 only when star,
     # planets and eccentricities all draw small) -- chasing exact counts

@@ -1,8 +1,8 @@
-"""Comparison graphs for the last 4 solar models: mean PLANET position error
+"""Comparison graphs for the solar models: mean PLANET position error
 vs rollout frame (suns excluded by construction of orbit_errors) and mean
 |radius drift| vs frame. 300-frame rollouts, 500 scenes, each model at its
-protocol ns (chunk-1 models ns3, chunk-5 models ns2; the chunk-1 ns sweep
-showed ns2==ns3 for them). Reads the cmp_*.json files."""
+protocol ns (chunk-1 models ns3, chunk-5 models ns2). Reads the
+cmp_*.json files."""
 import json
 
 import matplotlib

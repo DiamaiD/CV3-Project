@@ -1,7 +1,7 @@
 """Centroid ball tracker for the constants pipeline: mask-weighted centroid
-(the method that reached 0.009 px on solar) instead of template-matching
-peaks -- TM peaks lag on the soft renders of crowded scenes, and that lag is
-exactly the acceleration damping that produced the fake gravity dilution.
+instead of template-matching peaks -- TM peaks lag on the soft renders of
+crowded scenes, and that lag reads as acceleration damping (fake drag and
+gravity dilution).
 
 Balls only, white-bg world: per ball, per frame -- window at the running
 track, soft color mask (fill+outline axes, deformation-metric machinery),
@@ -76,7 +76,7 @@ def track_balls_centroid(frames, objs, init_pos_world, height=64, pad=12,
             # window centered at the VELOCITY-PREDICTED position: centering
             # on the previous position clips fast balls at the window edge,
             # dragging the centroid backward -- a speed-proportional lag the
-            # gravity fit reads as fake drag (measured c 0.036 vs true 0.02)
+            # gravity fit reads as fake drag
             pred_r = pos[i][0] + vel[i][0]
             pred_c = pos[i][1] + vel[i][1]
             r0 = int(round(pred_r)) - half

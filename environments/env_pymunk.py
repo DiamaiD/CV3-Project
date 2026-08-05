@@ -6,10 +6,9 @@ materials. Bodies, spawn laws, renderer and the output format (frame PNGs +
 positions/velocities/angles npys + objects.json) are shared with env_shapes, so every
 audit / gif / extraction tool runs unchanged on both backends.
 
-THE PRODUCTION BACKEND for shapes / tower / balls2 since 2026-07-21 (Viktor: "we adapt
-our physics to the new engine"). Chipmunk's contact conventions are the defining
-physics from here on -- the old engine's rules are the deviation, kept only to
-reproduce pre-migration datasets:
+THE PRODUCTION BACKEND for shapes / tower / balls2. Chipmunk's contact conventions
+are the defining physics; the old engine's rules are kept only to reproduce
+pre-migration datasets:
   - restitution of a contact = product of the two shapes' elasticity (old engine: min).
   - friction of a contact = product of the two shapes' friction. Per-material friction
     is sqrt(1 - retention), so a same-material pair reproduces the old Coulomb mu
@@ -18,8 +17,7 @@ reproduce pre-migration datasets:
     Chipmunk constants: restitution e_i (same as old), friction sqrt(1 - retention)
     (old used 1 - retention -- walls are somewhat grippier now, one consistent
     product rule everywhere instead of a special wall case).
-  - contact resolution: warm-started sequential impulses with Baumgarte bias + slop
-    (industry solver -- the thing we had been approximating by hand).
+  - contact resolution: warm-started sequential impulses with Baumgarte bias + slop.
 """
 import os
 import json
@@ -35,14 +33,9 @@ from environments.env_shapes import (_draw, _make_shape, _spawn_shapes, _poly_pr
 from environments.env_tower import (_build_tower, _build_tower_uniform, _make_projectile,
                                     PROJECTILE_KINDS)
 
-# Production solver settings, chosen by a 4-config accuracy/speed sweep (60 towers +
-# 60 shapes scenes per config, energy + penetration audits):
-#   sub16/it20/slop.08: 116ms/traj, tower transient pen 0.64px
-#   sub32/it30/slop.05: 165ms/traj, MAX pen 0.08px anywhere, energy 0.02% viol  <- this
-#   sub64 variants: pen 0.04 but slower and prone to single-event energy spikes
-# 32 substeps halve the per-step travel (fast projectiles move <=0.25px/substep -> no
-# tunneling class of error), 30 iterations converge stacks, slop 0.05 is the resting
-# overlap. ~100x faster than the hand-written engine at strictly better accuracy.
+# Production solver settings: 32 substeps halve the per-step travel (fast
+# projectiles move <=0.25px/substep -> no tunneling class of error), 30 iterations
+# converge stacks, slop 0.05 is the resting overlap.
 N_SUBSTEPS = 32
 ITERATIONS = 30
 SLOP = 0.05
@@ -212,8 +205,8 @@ def generate_tower_pymunk(data_dir="data/tower_pm", n_trajectories=100, max_fram
             sp.step(dt)
         plank_ys = [o["y"] for o in objs if o["kind"] == "plank"]
         kind = str(np.random.choice(kinds, p=probs))
-        # easy mode: heavy FAST shots, mostly plunging from high up (Viktor
-        # prefers the from-the-top look; flat_prob keeps a flat minority).
+        # easy mode: heavy FAST shots, mostly plunging from high up
+        # (flat_prob keeps a flat minority).
         # Slow lobs (the arrival-derived speeds, ~2 px/frame) lean on the tower
         # instead of toppling it, so speed is set directly and the launch side
         # maximizes the runway. All 4 materials stay in play (material variety

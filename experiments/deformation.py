@@ -263,7 +263,7 @@ def score_frames(frames, objs_json, thetas, init_pos_world, height=64,
                     tcy, tcx = tpl_centers[i]
                     pos[i] = (gy + tcy, gx + tcx)
             presence[t, i] = inter / area_t
-            # metric v6 (2026-08-05, Viktor): the SCORE counts only CLEAR
+            # the SCORE counts only CLEAR
             # pixel disagreement (coverage difference > 0.5), so the
             # decoder's soft anti-aliased rim -- invisible gray
             # disagreement that dominated the soft score -- does not count
@@ -323,14 +323,12 @@ def score_frames(frames, objs_json, thetas, init_pos_world, height=64,
                 pos[i] = (top + my + qy + tcy, left + mx + qx + tcx)
             tracks[t, i] = pos[i]
             foots[i] = (top + my, left + mx, tv > 0.5)
-        # blob-based contamination (metric v5, from the counting campaign):
-        # same-material objects poison each other's scores only when their
-        # pixels actually CONNECT (shared component within the NEAR_PX bulge
-        # ring) -- the old radius test (half + template size, ~44px on a 64px
-        # frame) discarded most contact frames, exactly where deformation
-        # lives. Blob separation was proven reliable on 300k real frames by
-        # the counting-metric GT control; a tracking swap still flags, because
-        # both footprints land on the same blob the moment it happens.
+        # blob-based contamination: same-material objects poison each
+        # other's scores only when their pixels actually CONNECT (shared
+        # component within the NEAR_PX bulge ring) -- a plain radius test
+        # discards most contact frames, exactly where deformation lives.
+        # A tracking swap still flags, because both footprints land on the
+        # same blob the moment it happens.
         for mat in mats_multi:
             key = (t, mat)
             if key not in _full_masks:
@@ -398,7 +396,7 @@ def rollout_and_score(run_dir, traj_dir, n_steps=80, device="cuda", loaded=None)
          .float().div_(255.0).to(device))
     # deterministic rollout noise per trajectory: without this, every scoring
     # pass draws fresh flow-matching noise and per-kind excesses wobble by
-    # ~0.02 between identical invocations (caught 2026-07-29)
+    # ~0.02 between identical invocations
     torch.manual_seed(zlib.crc32(os.path.basename(traj_dir).encode()) & 0x7FFFFFFF)
     preds = []
     with torch.no_grad():
@@ -422,8 +420,8 @@ def rollout_and_score(run_dir, traj_dir, n_steps=80, device="cuda", loaded=None)
     model = score_frames(pred_frames, objs, thetas, init, outline=outline)
     # floor = GT through the SAME VAE round-trip: model frames are decoder
     # outputs, and the decoder smooths seam/AA artifacts that raw GT frames
-    # carry -- a raw-GT floor over-subtracts (negative excesses, look-dependent
-    # bias; caught by Viktor 2026-07-29)
+    # carry -- a raw-GT floor over-subtracts (negative excesses,
+    # look-dependent bias)
     gt_slice = frames_np[ctx_len:ctx_len + n_steps]
     with torch.no_grad():
         xg = (torch.from_numpy(gt_slice).permute(0, 3, 1, 2)

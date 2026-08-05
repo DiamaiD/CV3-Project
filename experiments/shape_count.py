@@ -1,4 +1,4 @@
-"""Count-based integrity check (Viktor's idea): per frame, count shapes present
+"""Count-based integrity check: per frame, count shapes present
 per material (connected components of the color mask, merged blobs counted by
 mass) and compare against how many SHOULD be there. Identity-free -- immune to
 tracking/swap artifacts by construction. Outputs shape_count.json + png."""
@@ -37,26 +37,15 @@ def _match_counts(masses, areas):
     upper shape's outline overdraws the lower one; blended seam pixels fail
     both color masks), while a light resting touch destroys nothing and AA
     bridging can even ADD a few px. Singles get the same slack (neighbors of
-    another material erode them too). The search must be GLOBAL: greedy
-    smallest-fit filed a light-touch pair as a triple and orphaned the real
-    third ball as a phantom (traj-395); greedy largest-fit starved the 4th
-    object of a fully-crushed 4-stack (traj-42/142). Joint cost gets both.
-    Components no subset explains feed a fragment pool for still-missing
-    objects (draw-order occlusion splits shapes); with nothing missing,
-    shape-sized leftovers count as SURPLUS phantoms.
-
-    Merge slack is CAPPED at 28% of the subset mass and any explanation
-    missing its band by >25px is invalid outright: with a flat 60px/junction
-    the floor for small pairs fell to 47% of their mass, and the 100-point
-    miscount penalty let explanations absorb up to 99px of band violation --
-    together these accepted model rollouts that had genuinely swallowed an
-    object as 'deeply merged pairs' (all 5 tracker-proven death scenes slipped
-    through; worst real GT merge keeps 78%)."""
+    another material erode them too). Components no subset explains feed a
+    fragment pool for still-missing objects (draw-order occlusion splits
+    shapes); with nothing missing, shape-sized leftovers count as SURPLUS
+    phantoms. Merge slack is capped at 28% of the subset mass and any
+    explanation missing its band by >25px is invalid outright."""
     # areas entries may be scalars (exact expected mass, the normal case)
     # or (lo, hi) intervals -- used by the size-OOD sets, where the model
     # renormalizes balls toward the trained radius band and a resized-but-
-    # present ball must not be declared dead (audit 2026-08-06: 32% of
-    # 'deaths' in the large set were shrunk balls outside the bands)
+    # present ball must not be declared dead
     lohi = [(a if isinstance(a, tuple) else (a, a)) for a in areas]
     los = [a for a, _ in lohi]
     his = [b for _, b in lohi]
@@ -92,8 +81,6 @@ def _match_counts(masses, areas):
                 # pool covers at most ONE object per leftover comp: it exists
                 # to reassemble an occlusion-split object from its fragments,
                 # not to let a single swallowed-pair blob pay for two objects
-                # (traj-75: one 197px Steel blob covered 104.6 fully + 204.7
-                # at 45% and hid a tracker-proven death)
                 pool, pops = sum(leftover), 0
                 while rem and pops < len(leftover) and pool >= 0.4 * rem[0]:
                     pool -= rem.pop(0)
@@ -145,14 +132,11 @@ def _count_pair(payload):
                 (min(a, lo_t), max(a, hi_t)))
         else:
             mats.setdefault(o["material"], []).append(a)
-    # calibrate colors ONCE per material (was recomputed EVERY frame -- each
-    # call renders a calibration image; 375k redundant renders across a full
-    # 500-scene pass. Caught by Viktor via "why is this still running".)
+    # per material, not per frame: each call renders a calibration image
     colors = {mat: _fill_outline_rgb(mat) for mat in mats}
-    # bordered looks (norot v1): the gray frame is 17 RGB units from Steel's
-    # fill -- inside COLOR_TOL -- and merges with every object resting on it.
-    # 21.4% false sustained loss on REAL v1n frames until excluded (the
-    # deformation scorer already excludes it; the counter must too).
+    # bordered looks: the gray frame is within COLOR_TOL of Steel's fill
+    # and merges with every object resting on it; exclude it (the
+    # deformation scorer does too)
     bpx = detect_border_px(pred[0])
     deficit = np.zeros(pred.shape[0])
     surplus = np.zeros(pred.shape[0])
@@ -168,10 +152,9 @@ def _count_pair(payload):
                 w[:, -k:] = 0.0
             m = (w >= 0.5).astype(np.uint8)
             n_comp, lab = cv2.connectedComponents(m)
-            # CRITERION CONSISTENCY (audit 2026-07-29): comp mass must be the
-            # SOFT coverage sum, same as the template areas -- binary-counting
-            # the AA skirt inflated small objects up to +51% and minted
-            # phantom shapes (2092 surplus frames on REAL sim frames).
+            # comp mass must be the SOFT coverage sum, same as the template
+            # areas -- binary-counting the AA skirt inflates small objects
+            # and mints phantom shapes
             soft = np.bincount(lab.ravel(), weights=w.astype(np.float64).ravel(),
                                minlength=n_comp)
             masses = sorted((float(s) for s in soft[1:] if s >= 8.0),

@@ -4,7 +4,7 @@ import importlib
 import numpy as np
 from multiprocessing import get_context
 
-# Viktor's box: 16 cores / 32 threads -- generation always uses all of them.
+# 16 cores / 32 threads -- generation always uses all of them.
 N_WORKERS = 32
 
 

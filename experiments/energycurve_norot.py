@@ -1,4 +1,4 @@
-"""Energy curves for the norot era (v2: 500 scenes, GPU-batched 96, parallel
+"""Energy curves for the norot datasets (500 scenes, GPU-batched 96, parallel
 CPU tracking overlapped with the GPU): fresh 305-frame simulations (same physics
 seed for both looks -> identical scenes), 300-step model rollouts, per-frame
 total energy (kinetic + potential; rotation frozen) pooled as a fraction of

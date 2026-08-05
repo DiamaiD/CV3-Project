@@ -1,7 +1,7 @@
 """Model restitution on the engineered bounce banks: roll the balls-60k
 model on the bank scenes (full 7/9-ball OOD context, guaranteed clean bounce
-geometry), track with the refined tracker, extract the target material's
-restitution with estimator v4. Saves bank_restitution.json."""
+geometry), track with the centroid tracker, extract the target material's
+restitution. Saves bank_restitution.json."""
 import json
 import os
 import zlib

@@ -54,7 +54,7 @@ def _smooth(P):
 ROLL = 25           # rolling-median window on the eps SERIES (not positions):
                     # true eps is constant and model eps drifts over hundreds
                     # of frames, so this denoises without the perihelion bias
-                    # that position smoothing showed in stage A
+                    # of position smoothing
 
 
 def eps_deviation(P_pl, P_star, gm, eps_true, smooth=False, roll=False):

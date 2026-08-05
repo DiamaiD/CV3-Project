@@ -20,8 +20,8 @@ TRIAL_TILT = 0.15          # rad; unstable ones reach 3px+ / 0.9rad+
 # from frame 0 -- the static phase is real stability, not a freeze.
 PROJECTILE_KINDS = {"ball": 0.40, "square": 0.15, "triangle": 0.15, "halfdisc": 0.15,
                     "hexagon": 0.15}
-# Easy-mode (2026-07-24): the distinct-silhouette roster, shared with the shapes env
-# (no plank here -- Viktor's call: planks are the tower's building material only).
+# Easy-mode: the distinct-silhouette roster, shared with the shapes env
+# (no plank: planks are the tower's building material only).
 EASY_PROJECTILE_KINDS = {"ball": 0.40, "triangle": 0.30, "plus": 0.30}
 EASY_TOPPER_KINDS = ["ball", "triangle", "plus"]
 

@@ -3,7 +3,7 @@
 Round-trips held-out frames through an autoencoder (deterministic mu path) and
 scores, per dataset:
 
-  frame PSNR / LPIPS   -- whole-frame fidelity (comparable to the old VAE table)
+  frame PSNR / LPIPS   -- whole-frame fidelity
   object PSNR          -- pooled over each object's own box (r+2), background-free
   contact / free PSNR  -- object PSNR split by bounding-circle contact
   dot PSNR             -- pooled over small windows at the EXACT orientation-dot

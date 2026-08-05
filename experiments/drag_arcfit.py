@@ -1,7 +1,7 @@
 """Whole-arc drag estimator: fit each free-flight segment by integrating the
 ENGINE'S EXACT map (32 substeps, semi-implicit, per-axis quadratic drag --
-vx|vx| / vy|vy|, as _vel_func really does; the old regressor's vector-speed
-form was itself a bias source). Drag's cumulative displacement over a 15-40
+vx|vx| / vy|vy|, exactly as _vel_func does; a vector-speed c*v*|v| form
+is a bias source). Drag's cumulative displacement over a 15-40
 frame arc is pixels -- hundreds of times above tracking noise -- and nothing
 is differentiated, so sub-pixel ripple cannot rectify. Per-segment c via
 least squares over (x0, y0, vx0, vy0, c); robust median across segments.

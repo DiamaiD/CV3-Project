@@ -10,7 +10,7 @@ this dataset), identical surrogate (fresh init, fixed seed, 30 ep / w192).
   python -m experiments.surrogate --runs runA,runB,... [--data data/bouncing_36k_v2]
 
 Rank AEs by surrogate 1-step PSNR; trust separations >= ~0.3 dB (calibrated
-against paired 10-ep DiT runs, 2026-07-16).
+against paired 10-ep DiT runs).
 """
 import argparse
 import json

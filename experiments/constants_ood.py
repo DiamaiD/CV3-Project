@@ -94,11 +94,11 @@ def _collect(payload):
             # (no gravity horizontally) -- flag 1/0 selects the g column
             rows.append((d2y, 1.0, v[t, i, 1] * sp * r / masses[i], sp))
             rows.append((d2x, 0.0, v[t, i, 0] * sp * r / masses[i], sp))
-        # floor bounces, estimator v2: GRAVITY-PROJECTED impact speeds.
+        # floor bounces: GRAVITY-PROJECTED impact speeds.
         # One-frame differences give the exact parabola speed at the interval
         # midpoint; projecting both to the impact frame removes the ~1 px/f
-        # gravity haircut that biased ratios low by ~10% and produced the fake
-        # count-trend (slow settled-scene bounces are hit hardest). Events
+        # gravity haircut that biases ratios low (slow settled-scene bounces
+        # are hit hardest). Events
         # must be isolated (no other ball nearby t-3..t+3) -- crowded rebounds
         # get clipped mid-window.
         y = pos[:, i, 1]
@@ -107,8 +107,7 @@ def _collect(payload):
             if y[t] <= y[t - 1] and y[t] < y[t + 1] and y[t] < r + 2.5:
                 # REAL-FALL gate: the model settles soft materials with a
                 # hover-wobble whose sub-px local minima masquerade as
-                # bounces at ratio ~1 (inflated Sponge to 0.47; caught by
-                # Viktor + frame audit). A genuine impact is preceded by a
+                # bounces at ratio ~1. A genuine impact is preceded by a
                 # monotonic multi-px approach.
                 if not (y[t - 3] > y[t - 2] > y[t - 1]
                         and y[t - 3] - y[t] >= 2.5):

@@ -1,4 +1,4 @@
-"""FINAL drag retest (Viktor-approved, all four counts): arc-fit both arms
+"""Drag retest, all four counts: arc-fit both arms
 under ONE extraction config -- model rollouts vs ceiling (VAE-roundtripped
 true physics), per count over base+ext+hot+bank scene sets. Calibrated
 model drag = model/ceiling x 0.02 with propagated SE. Plus the g-free

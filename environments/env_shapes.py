@@ -22,8 +22,8 @@ from environments.env_bouncing import MATERIALS, WIDTH, HEIGHT, GRAVITY, AIR_DRA
 # PEN_SLOP: corrections leave this much overlap unresolved. Without it, every substep of
 # a gravity-loaded stack cycles sink -> impulse zeroes the approach speed (dissipative,
 # correct) -> positional pass lifts the body fully back up, injecting free potential
-# energy (audited: up to +2% of scene energy per frame in tower collapses; the velocity
-# passes were honestly dissipative). 0.08 px is invisible at 64x64 under AA.
+# energy (up to +2% of scene energy per frame in tower collapses). 0.08 px is
+# invisible at 64x64 under AA.
 #
 # PCORR_CAP: per-body, per-SUBSTEP total positional-correction budget (Box2D's
 # maxLinearCorrection idea). During active collapse, bodies interpenetrate by ~their
@@ -36,7 +36,7 @@ _LEGACY_SETTLE = os.environ.get("CV3_SHAPES_LEGACY_SETTLE", "0") == "1"
 PEN_SLOP = 0.0 if _LEGACY_SETTLE else 0.08
 PCORR_CAP = float("inf") if _LEGACY_SETTLE else 0.15
 # Deep-penetration escape hatch: a fixed budget alone lets a violent collapse accumulate
-# multi-px overlap (audited 3.1px transients -- a thin plank visibly inside another) because
+# multi-px overlap (3px transients -- a thin plank visibly inside another) because
 # the sink rate outpaces PCORR_CAP for several substeps. Box2D-style proportional boost:
 # when a contact is over-penetrated, the involved bodies' budgets are topped up to
 # PCORR_FRAC x the excess, so a 3px overlap resolves within ~a frame while ordinary
@@ -49,10 +49,9 @@ PCORR_FRAC = 0.3
 # impact substeps where it triggers. Off under the legacy flag.
 CCD_TOL = 0.2
 CCD_SPLIT = 4
-# SKIN stays 0: a physical contact skin was tried and rejected (bodies pogo on the skin
-# surface and never sleep). A render-side inset + edge outline was also tried and
-# REJECTED BY VIKTOR (2026-07-21, "keep the new look, no insets and no borders"):
-# markers="on" now renders flat bodies with orientation dots only.
+# SKIN stays 0: a physical contact skin makes bodies pogo on the skin surface and
+# never sleep. No render-side inset or edge outline either: markers="on" renders
+# flat bodies with orientation dots only.
 SKIN = 0.0
 
 
@@ -72,18 +71,18 @@ def _rot_drag(o, dt):
 KINDS = ["ball", "halfdisc", "triangle", "square", "plank", "hexagon", "plus"]
 DEFAULT_KIND_WEIGHTS = {"ball": 0.25, "halfdisc": 0.15, "triangle": 0.15,
                         "square": 0.15, "plank": 0.15, "hexagon": 0.15}
-# The easy-mode roster (2026-07-24 redesign): four maximally distinct silhouettes.
+# The easy-mode roster: four maximally distinct silhouettes.
 EASY_KIND_WEIGHTS = {"ball": 0.25, "triangle": 0.25, "plus": 0.25, "plank": 0.25}
 PLUS_ARM_FRAC = 0.34    # plus arm half-thickness as a fraction of its half-length
-# Per-kind size ranges (2026-07-26): triangle and plank have the smallest AREA
+# Per-kind size ranges: triangle and plank have the smallest AREA
 # per unit size (~1.3r^2 / 1.6r^2 vs the ball's 3.1r^2), which made their small
 # instances the DiT's contact victims (deformed then swallowed). Their ranges
 # rise mostly from the bottom -- rough area parity with the other kinds at the
 # low end, max nudged only slightly.
 EASY_SIZE_RANGES = {"triangle": (7.0, 9.0), "plank": (6.5, 8.5)}
-# v3 (2026-07-28): plus joined the enlarged kinds (it became the deformation
-# victim once triangles grew). Keep EASY_SIZE_RANGES frozen for v2
-# reproducibility; v3 datasets use this instead.
+# v3: plus joined the enlarged kinds (it became the deformation victim once
+# triangles grew). EASY_SIZE_RANGES stays frozen for v2 reproducibility;
+# v3 datasets use this.
 EASY_SIZE_RANGES_V3 = {"triangle": (7.0, 9.0), "plank": (6.5, 8.5),
                        "plus": (6.5, 8.5)}
 REST_OMEGA = 0.05
@@ -190,11 +189,9 @@ CLASSIC_MATERIALS = ["Superball", "Rubber", "Steel", "Sponge"]
 def _make_shape(width, height, speed_min, speed_max, kind_weights, spin_max,
                 y_frac_min=0.3, y_frac_max=1.0, vertex_jitter=0.0,
                 size_min=5, size_max=8, size_ranges=None):
-    # sample from the CLASSIC four, never the whole dict: MATERIALS also holds
-    # the env_solar bodies since 2026-07-30, and `list(MATERIALS.keys())`
-    # silently rolled RedStar/Rocky balls into freshly generated shapes/balls
-    # scenes -- an accidental unseen-color OOD test that poisoned a whole
-    # count-OOD campaign before frames were checked. Every pre-solar dataset
+    # sample from the CLASSIC four, never the whole dict: MATERIALS also
+    # holds the env_solar bodies, and `list(MATERIALS.keys())` would roll
+    # star/planet colors into shapes/balls scenes. Every pre-solar dataset
     # used exactly these four, in this order (np.random stream compatible).
     mat_name = np.random.choice(CLASSIC_MATERIALS)
     mat = MATERIALS[mat_name]
@@ -306,9 +303,9 @@ def _project_interval(verts, nx, ny):
 
 def _poly_poly_contact(A, B):
     # Vectorized SAT over all edge normals at once. Arithmetic is elementwise
-    # only (no matmul/FMA reassociation), so every value is bit-identical to
-    # the previous per-edge loop; np.argmin picks the first minimum exactly
-    # like the old strictly-smaller update did.
+    # only (no matmul/FMA reassociation) and np.argmin takes the FIRST
+    # minimum, so every value stays bit-identical to a per-edge loop with
+    # strictly-smaller updates (dataset reproducibility).
     (va, ea), (vb, eb) = _world_geo(A), _world_geo(B)
     E = np.concatenate([ea, eb])
     ln = np.hypot(E[:, 0], E[:, 1])
@@ -1004,7 +1001,7 @@ def generate_balls2_data(data_dir="data/balls2", n_trajectories=5000, max_frames
     env_bouncing's frictionless point-mass balls. Same spawn law as
     generate_bouncing_data (counts, speeds, radii, floor bias); markers default ON so
     every ball's orientation is readable from pixels (two-dot constellation).
-    Superseded by env_pymunk.generate_balls2_pymunk for new datasets."""
+    For new datasets use env_pymunk.generate_balls2_pymunk."""
     return generate_shapes_data(
         data_dir=data_dir, n_trajectories=n_trajectories, max_frames=max_frames,
         width=width, height=height, n_objects_min=n_balls_min, n_objects_max=n_balls_max,
