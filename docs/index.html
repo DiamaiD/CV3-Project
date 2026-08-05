@@ -351,9 +351,13 @@
   </p>
   <div class="figure"><img src="assets/size_survival.svg" alt="Survival for reference, small and large balls"></div>
   <p class="read">
-    Most losses happen in the first frames, while the model is resizing
-    the balls. After that the decline is slow, ending near 82–83% for both
-    the small and the large balls.
+    Large balls essentially all survive: after the model shrinks them to
+    trained sizes, they behave like trained balls and their curve lies on
+    the reference. Small balls genuinely disappear during the resize:
+    survival drops to 84% in the first frames and stays there. (An earlier
+    version of this graph under-counted resized balls as missing; the
+    counter now accepts a ball at its true or trained size, verified
+    against total pixel mass.)
   </p>
   <div class="figure"><img src="assets/size_deform.svg" alt="Deformation for reference, small and large balls"></div>
   <p class="read">
