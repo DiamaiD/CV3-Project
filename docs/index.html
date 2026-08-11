@@ -126,12 +126,11 @@
     image-rendering: pixelated; border: 1px solid var(--line);
     border-radius: 8px; background: white;
   }
-  /* five-panel clips are 1008 px wide: let them out of the text column so
-     they render at their own size instead of being scaled down */
-  .gifview.five {
-    width: min(1008px, calc(100vw - 32px));
-    margin-left: calc((100% - min(1008px, calc(100vw - 32px))) / 2);
-  }
+  /* clips stay inside the text column. The five-panel ones are 1008 px of
+     source and get scaled down to fit, so they render smoothly rather than
+     with the nearest-neighbour rule that suits upscaled pixel art */
+  .gifview.five { max-width: 100%; }
+  .gifview.five img { image-rendering: auto; }
   .gifview.three { max-width: 600px; }
   /* panel names as real text, in a grid whose columns match the clip's
      panels exactly: 192 px cells with 12 px gaps, expressed as fractions
